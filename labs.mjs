@@ -192,7 +192,7 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
         job.loginDiag = redact(stderrTail);
         if (code === 0) void execute(job);
         else if (Date.now() - loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Repaste the helper for a fresh job and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
-        else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ' No termlog error text; the login popup may have been closed.'} Start a new job.`; void rm(dir, { recursive: true, force: true }); }
+        else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ' No termlog error text; the login popup may have been closed.'} Start a new job.`; console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - loginStarted) / 1000)}s stderr=${tail.slice(0, 300)}`); void rm(dir, { recursive: true, force: true }); }
       });
       return { id, token };
     },
