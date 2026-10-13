@@ -12,7 +12,7 @@ fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 60, 512, 0, 0))
 deadline = time.monotonic() + spec.get('timeout', 900)
 output = b''
 
-def read_until(pattern, timeout=120):
+def read_until(pattern, timeout=240):
     global output
     start = time.monotonic()
     while time.monotonic() < deadline and time.monotonic() - start < timeout:
@@ -34,15 +34,23 @@ def read_until(pattern, timeout=120):
             return match, text
     raise RuntimeError('Timed out waiting for the real command output.')
 
+def progress(message):
+    print(message, file=sys.stderr, flush=True)
+
 try:
-    time.sleep(0.5)
+    time.sleep(2.0)
     os.write(master, b"printf '\\n__TDS_READY__\\n'\n")
-    read_until(r'\n__TDS_READY__\n', 30)
+    read_until(r'\n__TDS_READY__\n', 60)
+    progress('TDS-READY shell is live')
     for index, command in enumerate(spec['commands']):
         marker = '__TDS_DONE_' + str(index) + '__'
         os.write(master, (command + '\nprintf "\\n' + marker + '%s\\n" "$?"\n').encode())
-        match, text = read_until(r'\n' + marker + r'(\d+)\n')
+        try:
+            match, text = read_until(r'\n' + marker + r'(\d+)\n')
+        except RuntimeError:
+            raise RuntimeError(f'Timed out waiting for output of lab command {index + 1}/{len(spec["commands"])} (starts with: {command[:80]!r}).')
         if int(match.group(1)) != 0: raise RuntimeError('Lab command ' + str(index + 1) + ' failed with exit status ' + match.group(1))
+        progress(f'TDS-PROGRESS {index + 1}/{len(spec["commands"])}')
     os.write(master, b'exit\n')
     while time.monotonic() < deadline:
         done, status = os.waitpid(pid, os.WNOHANG)

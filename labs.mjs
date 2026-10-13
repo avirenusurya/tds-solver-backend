@@ -6,6 +6,9 @@ import crypto from 'node:crypto';
 
 const quote = (value) => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
 const redact = (text) => String(text || '').replace(/(code|state|refresh_token|id_token|access_token|client_secret)=[^&\s"']+/g, '$1=REDACTED').slice(-500);
+// Headless servers have no browser; termlog says so on every login. Expected
+// noise — never show it in the panel.
+const cleanDiag = (text) => redact(text).replace(/!!! Could not launch browser automatically:[^\n]*\n?/g, '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const taskIds = { decode: 'q-termlog-rec-server', httpbin: 'q-termlog-httpbin-server', model: 'q-termlog-ollama-modelfile-server' };
 const hashEmail = (email) => {
@@ -195,13 +198,13 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
             }
           }
         });
-        child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = redact(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
-        child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = redact(stderrTail); await rm(dir, { recursive: true, force: true }); });
+        child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = cleanDiag(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
+        child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = cleanDiag(stderrTail); await rm(dir, { recursive: true, force: true }); });
         child.on('close', (code, signal) => {
           delete job.login;
-          job.loginDiag = redact(stderrTail);
+          job.loginDiag = cleanDiag(stderrTail);
           if (code === 0) { void execute(job); return; }
-          console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - job.loginStarted) / 1000)}s attempted=${job.callbackAttempted} respawns=${job.respawns} stderr=${redact(stderrTail).trim().slice(0, 300)}`);
+          console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - job.loginStarted) / 1000)}s attempted=${job.callbackAttempted} respawns=${job.respawns} stderr=${cleanDiag(stderrTail).slice(0, 300)}`);
           if (!job.callbackAttempted && (job.status === 'starting' || job.status === 'authentication') && job.respawns < 5) {
             job.respawns++;
             job.message = 'Login listener restarted — use the current sign-in link below.';
@@ -209,7 +212,7 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
             return;
           }
           if (Date.now() - job.loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Use “Start fresh job” in the panel and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
-          else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - job.loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ''} Use “Start fresh job” in the panel.`; void rm(dir, { recursive: true, force: true }); }
+          else { const tail = cleanDiag(stderrTail); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - job.loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ''} Use “Start fresh job” in the panel.`; void rm(dir, { recursive: true, force: true }); }
         });
       };
       spawnLogin();
