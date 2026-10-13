@@ -173,7 +173,8 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
       delete env.TERMLOG_ALLOW_DEV_AUTH;
       const child = spawn(termlog, ['login'], { env, stdio: ['ignore','pipe','pipe'] });
       job.login = child;
-      let output = '';
+      const loginStarted = Date.now();
+      let output = '', stderrTail = '';
       child.stdout.on('data', (data) => {
         output = (output + data).slice(-16000);
         const match = output.match(/https:\/\/accounts\.google\.com\/[^\s]+/);
@@ -182,11 +183,12 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
           job.publicAuthUrl = url.href; job.status = 'authentication'; job.message = 'Sign in with your registered Google email, then return the localhost callback URL.';
         }
       });
-      child.stderr.on('data', () => {}); // Never stream credential-related diagnostics into public logs.
+      child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-500); }); // No credentials on stderr; timeout notice lives here.
       child.on('error', async () => { job.status = 'error'; job.message = 'Could not start the official termlog binary.'; await rm(dir, { recursive: true, force: true }); });
       child.on('close', (code) => {
         delete job.login;
         if (code === 0) void execute(job);
+        else if (Date.now() - loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Repaste the helper for a fresh job and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
         else { job.status = 'error'; job.message = 'Google sign-in failed or timed out. Start a new job.'; void rm(dir, { recursive: true, force: true }); }
       });
       return { id, token };

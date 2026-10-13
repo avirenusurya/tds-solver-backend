@@ -385,6 +385,7 @@
           onArtifact: (qid, url) => { if (document.getElementById(qid)) fill(qid, url); },
         });
       })().catch(error => { console.error('[signed labs]', error.message); return null; });
+      console.info('[ga2] Signed-lab panel is opening — complete Google sign-in + paste within 5 minutes (official login limit) while Check runs. Codes are single-use.');
     }
   }
 

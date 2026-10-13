@@ -27,7 +27,7 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
   const title = document.createElement('strong'); title.textContent = 'Signed terminal labs — ' + email;
   const status = document.createElement('p'); status.textContent = 'Starting…';
   const instructions = document.createElement('p');
-  instructions.textContent = 'Sign in with this exam email. After Google sign-in, the popup reaches a localhost address. Copy its complete address below so the backend can finish the callback.';
+  instructions.textContent = 'Sign in with this exam email NOW — the official login waits at most 5 minutes. After Google sign-in, the popup reaches a localhost address. Copy its complete address below so the backend can finish the callback. Each code is single-use: always use the fresh URL from THIS panel.';
   const login = document.createElement('button'); login.type = 'button'; login.textContent = 'Open Google sign-in'; login.disabled = true;
   const callback = document.createElement('input'); callback.type = 'url'; callback.placeholder = 'http://127.0.0.1:…/?state=…&code=…'; callback.style.cssText = 'display:block;width:100%;margin:12px 0';
   const finish = document.createElement('button'); finish.type = 'button'; finish.textContent = 'Complete sign-in';
@@ -55,6 +55,8 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
         const url = new URL(job.authUrl);
         if (url.hostname !== 'accounts.google.com' || url.protocol !== 'https:') throw new Error('Unexpected Google sign-in address.');
         authUrl = url.href; login.disabled = false;
+        status.textContent = 'Google sign-in is ready — open it NOW. The login expires 5 minutes after this panel appeared.';
+        console.info('[signed labs] Panel ready for ' + email + '. Complete Google sign-in + paste within 5 minutes; codes are single-use.');
       }
       for (const [qid, value] of Object.entries(job.artifacts || {})) {
         const url = new URL(value, backend).href;
