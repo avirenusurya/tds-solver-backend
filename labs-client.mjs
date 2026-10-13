@@ -39,10 +39,12 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
   finish.onclick = async () => {
     finish.disabled = true;
     try {
-      await request('/labs/job/' + started.id + '/callback', { callbackUrl: callback.value.trim() }, started.token);
+      const pasted = callback.value.trim();
+      if (!/^http:\/\/127\.0\.0\.1:\d+\/\?/.test(pasted)) throw new Error('That does not look like the localhost callback. Copy the FULL address from the sign-in popup (http://127.0.0.1:PORT/?state=...&code=...).');
+      await request('/labs/job/' + started.id + '/callback', { callbackUrl: pasted }, started.token);
       callback.value = ''; callback.disabled = true; login.disabled = true;
       status.textContent = 'Google callback received. Recording the labs…';
-    } catch (error) { status.textContent = error.message; finish.disabled = false; }
+    } catch (error) { status.textContent = error.message; console.error('[signed labs callback]', error.message); finish.disabled = false; }
   };
   try {
     const deadline = Date.now() + 20 * 60 * 1000;

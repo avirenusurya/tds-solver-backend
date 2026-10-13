@@ -23,11 +23,19 @@ export function validateChallengeUrl(value, email) {
 }
 
 export function validateCallback(value, authUrl) {
-  const expected = new URL(authUrl), redirect = new URL(expected.searchParams.get('redirect_uri'));
-  const callback = new URL(value);
-  if (redirect.hostname !== '127.0.0.1' || callback.origin !== redirect.origin || callback.pathname !== '/'
-    || callback.searchParams.get('state') !== expected.searchParams.get('state')
-    || !callback.searchParams.get('code')) throw new Error('Paste the complete localhost callback URL from this login attempt.');
+  let callback;
+  try { callback = new URL(String(value || '').trim()); }
+  catch { throw new Error('Paste the complete localhost callback URL (http://127.0.0.1:PORT/?state=...&code=...).'); }
+  let expected, redirect;
+  try { expected = new URL(authUrl); redirect = new URL(expected.searchParams.get('redirect_uri')); }
+  catch { throw new Error('This login session expired. Start a new job and use its fresh Google sign-in link.'); }
+  if (redirect.hostname !== '127.0.0.1') throw new Error('Unexpected login session. Start a new job.');
+  if (callback.protocol !== 'http:') throw new Error(`Callback must be http://127.0.0.1, got ${callback.protocol}//. Copy the localhost address from the sign-in popup, not the Google page.`);
+  if (callback.hostname !== '127.0.0.1') throw new Error(`Callback host must be 127.0.0.1, got ${callback.hostname}.`);
+  if (String(callback.port) !== String(redirect.port)) throw new Error(`Callback port ${callback.port || '(none)'} does not match this job's port ${redirect.port}. Use the localhost URL from THIS job's popup.`);
+  if (callback.pathname !== '/') throw new Error(`Callback path must be /, got ${callback.pathname}. Copy the full address including ?state=...&code=....`);
+  if (callback.searchParams.get('state') !== expected.searchParams.get('state')) throw new Error('Callback state does not match this login attempt. You pasted a URL from a different sign-in; use THIS job\'s popup URL.');
+  if (!callback.searchParams.get('code')) throw new Error('Callback is missing ?code=.... Wait for Google to redirect to localhost, then copy the complete address.');
   return callback.href;
 }
 
@@ -190,11 +198,13 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
     },
     async callback(id, token, value) {
       this.get(id, token); const job = jobs.get(id);
-      if (job.status !== 'authentication') throw new Error('This job is not waiting for sign-in.');
+      if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Start a new job for a fresh sign-in.`);
       const url = validateCallback(value, job.authUrl);
       // Forward only to the exact loopback port created by this job's official CLI.
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000), redirect: 'error' });
-      if (!response.ok) throw new Error('The termlog login callback failed.');
+      let response;
+      try { response = await fetch(url, { signal: AbortSignal.timeout(10000), redirect: 'error' }); }
+      catch (error) { throw new Error(`Could not reach the localhost listener on this job's port (${error.message}). The sign-in popup may have expired; start a new job.`); }
+      if (!response.ok) throw new Error(`The termlog login callback returned HTTP ${response.status}. Re-open THIS job's Google link and copy the fresh localhost URL.`);
       return { ok: true };
     },
   };
