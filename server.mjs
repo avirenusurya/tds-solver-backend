@@ -40,7 +40,7 @@ import { extractInvoice } from './invoice.mjs';
 const PORT = Number(process.env.PORT || 8080);
 const EXAM_ORIGIN = 'https://exam.sanand.workers.dev';
 const DATA_DIR = resolve(process.env.DATA_DIR || './data');
-const REVISION = '2026-10-13-real-validation-v1';
+const REVISION = '2026-10-13-real-validation-v2';
 
 /* ================= per-email seeds (exact chunk ports) ================= */
 const seedFor = (qid, email, ver = '') => seedrandom(`${qid}#${(email || '').trim().toLowerCase()}#${ver}`);
@@ -156,6 +156,7 @@ const obsLogs = new Map();   // `${email}` -> [{level,ts,path,request_id,method,
 const obsStart = new Map();  // `${email}` -> epoch sec
 const composeCounts = new Map(); // `${email}|${key}` -> n
 const ledgers = new Map();   // lowercased email -> {records, F}
+const invoiceDiagnostics = new Map(); // Last synthetic grader invoice, in memory only.
 
 function rateTake(key, limit) {
   const now = Date.now() / 1000;
@@ -616,12 +617,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       /* POST /extract (invoice fields; regex over the fixed grader format) */
+      if (sub === '/extract-status' && method === 'GET') {
+        const result = invoiceDiagnostics.get(emailL);
+        return sendJson(res, result ? 200 : 404, result || { error: 'No invoice received for this email yet.' }, withCors());
+      }
       if (sub === '/extract' && method === 'POST') {
         const raw = await readBody(req);
         let text = '';
         try { text = (JSON.parse(raw || '{}').text) ?? ''; } catch { text = ''; }
         try {
           const found = extractInvoice(text);
+          if (typeof text === 'string' && text.trim()) {
+            invoiceDiagnostics.set(emailL, { time: Date.now(), status: found ? 200 : 422, text: text.slice(0, 2000), result: found });
+            if (invoiceDiagnostics.size > 1000) invoiceDiagnostics.delete(invoiceDiagnostics.keys().next().value);
+          }
           if (!found) return sendJson(res, 422, { error: 'could not extract invoice fields', vendor: '', amount: 0, currency: '', date: '' }, withCors());
           return sendJson(res, 200, found, withCors());
         } catch {

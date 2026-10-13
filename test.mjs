@@ -75,6 +75,12 @@ test('random invoice amounts, currencies and full vendor punctuation survive ext
     assert.deepEqual(Object.keys(result).sort(), ['amount', 'currency', 'date', 'vendor']);
   }
   assert.equal(extractInvoice('Invoice from Example Co.\nTotal due: EUR 1,234.50\nDue date: 2026-04-30').amount, 1234.5);
+  assert.deepEqual(extractInvoice('Invoice from Acme-abc9 Industries Ltd. Please pay 503.41 EUR by 2026-08-29.'), {
+    vendor: 'Acme-abc9 Industries Ltd.', amount: 503.41, currency: 'EUR', date: '2026-08-29',
+  });
+  assert.deepEqual(extractInvoice('Vendor: Acme-013f Industries Ltd.\nBalance due USD 7,432.18\nPayment due 2026-12-08'), {
+    vendor: 'Acme-013f Industries Ltd.', amount: 7432.18, currency: 'USD', date: '2026-12-08',
+  });
 });
 
 test('malformed invoice inputs cannot produce HTTP 500 or fabricated fields', () => {
