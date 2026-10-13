@@ -4,6 +4,36 @@ The browser helpers read the current student's email and quiz signature from the
 
 `/backendVerify` always reaches the official exam server. Green checks are no longer fabricated. Signed terminal recordings, Tangram receipts and the live model evaluation must pass their actual validators.
 
+## Share with friends: host it yourself (free, no card)
+
+Render's infrastructure HEAD-probes every localhost port, which kills
+termlog's login listener in ~1s — the auto Google sign-in cannot work there.
+A home machine has no such prober, so one technical person hosts and everyone
+else just pastes. No payment, no new account anywhere.
+
+On the host machine:
+
+```bash
+docker build -t tds-backend .
+docker run -d --name tds --restart unless-stopped -p 8080:8080 -v tds-data:/app/data -e DATA_DIR=/app/data tds-backend
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+chmod +x cloudflared
+./cloudflared tunnel --url http://localhost:8080
+# note the https://....trycloudflare.com URL it prints
+```
+
+Everyone (including the host) runs this line before pasting the helper:
+
+```js
+window.GA1_OPTIONS = { backend: 'https://....trycloudflare.com' };
+window.GA2_OPTIONS = { backend: 'https://....trycloudflare.com' };
+```
+
+Rules: the host PC and tunnel stay on while anyone uses it; the tunnel URL
+changes on every restart, so share the fresh one; the first model-lab run
+pulls its Ollama model once and is slow; recordings run one at a time.
+Ledger and archives live in the `tds-data` volume and survive restarts.
+
 ## Deploy and use
 
 Deploy this repository to your existing Render web service. `GET /health` must report revision `2026-10-13-real-validation-v3`. Docker copies `server.mjs`, `ledger.mjs` and `invoice.mjs`; Node 20 or newer is required.
