@@ -62,7 +62,7 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
         if (url.hostname !== 'accounts.google.com' || url.protocol !== 'https:') throw new Error('Unexpected Google sign-in address.');
         const first = !authUrl;
         authUrl = url.href; login.disabled = false;
-        if (!first) refreshed = true;
+        if (!first) { refreshed = true; callback.value = ''; }
         status.textContent = first
           ? 'Google sign-in is ready — open it NOW. The login expires 5 minutes after this panel appeared.'
           : 'Sign-in link refreshed — open Google sign-in again and use the NEW localhost URL. Old codes are dead.';
