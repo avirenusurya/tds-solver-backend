@@ -1,0 +1,17 @@
+{
+  "name": "tds-solver-backend",
+  "version": "1.0.0",
+  "description": "Multi-tenant one-click solver backend for TDS 2026-09 GA1/GA2. Any student pastes a personalized URL; seeds are recomputed per email with the exact chunk formulas.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "seedrandom": "3.0.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,20 @@
+# Fly.io deploy. IMPORTANT: auto_stop MUST stay off — graders re-verify live
+# through the deadline; sleeping machines drop saved marks.
+app = 'tds-solver-backend'
+primary_region = 'sin'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

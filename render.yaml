@@ -1,0 +1,9 @@
+# Render deploy (persistent web service — no sleeping on starter plan).
+# NOTE: Render injects PORT itself — do NOT set it here. server.mjs reads it.
+services:
+  - type: web
+    name: tds-solver-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
