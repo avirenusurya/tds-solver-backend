@@ -29,6 +29,7 @@
  * restart our workers), so no Redis dependency is deployed.
  */
 import http from 'node:http';
+import net from 'node:net';
 import crypto from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import seedrandom from 'seedrandom';
@@ -326,6 +327,27 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         if (path === '/labs/health' && method === 'GET') return sendJson(res, 200, await labManager.health(), acaostar);
+        // Diagnostic: bind a loopback listener and report anything that
+        // connects to it. Identifies localhost probers that kill logins.
+        if (path === '/labs/probe' && method === 'GET') {
+          const seconds = Math.min(15, Math.max(3, Number(u.searchParams.get('seconds') || 8) || 8));
+          const probe = await new Promise((resolve) => {
+            const hits = [];
+            const srv = net.createServer((sock) => {
+              const peer = `${sock.remoteAddress}:${sock.remotePort}`;
+              const at = new Date().toISOString();
+              let buf = '';
+              sock.on('data', (chunk) => { buf += chunk.toString(); });
+              sock.on('close', () => hits.push({ at, peer, bytes: buf.slice(0, 200) }));
+              setTimeout(() => sock.destroy(), 1500);
+            });
+            srv.listen(0, '127.0.0.1', () => {
+              const port = srv.address().port;
+              setTimeout(() => srv.close(() => resolve({ port, waitedSec: seconds, hits })), seconds * 1000);
+            });
+          });
+          return sendJson(res, 200, probe, acaostar);
+        }
         if (path === '/labs/start' && method === 'POST') return sendJson(res, 201, await labManager.start(JSON.parse(await readBody(req))), acaostar);
         const match = /^\/labs\/job\/([0-9a-f-]{36})(\/callback)?$/.exec(path);
         const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');

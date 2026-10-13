@@ -217,7 +217,8 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
             if (fresh !== job.authUrl) {
               job.authUrl = fresh; const url = new URL(fresh); url.searchParams.set('login_hint', email);
               job.publicAuthUrl = url.href;
-              if (job.status !== 'authentication' || job.respawns > 0) job.message = 'Sign in with your registered Google email, then return the localhost callback URL.';
+              const portHint = (() => { try { return new URL(fresh).port; } catch { return ''; } })();
+              job.message = `Sign in with this exam email, then return the localhost callback URL (your URL must contain :${portHint}).`;
               job.status = 'authentication';
             }
           }
@@ -253,6 +254,14 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
     async callback(id, token, value) {
       this.get(id, token); const job = jobs.get(id);
       if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Use “Start fresh job” in the panel.`);
+      if (!job.login) {
+        // Listener respawn in flight: wait for the fresh link instead of
+        // failing against a dead port.
+        const deadline = Date.now() + 5000;
+        while (!job.login && Date.now() < deadline && job.status === 'authentication') await new Promise((r) => setTimeout(r, 200));
+        if (!job.login) throw new Error('The login listener is restarting — wait a few seconds, open the sign-in link again and paste the newest URL.');
+        if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Use “Start fresh job” in the panel.`);
+      }
       job.callbackAttempted = true;
       const url = validateCallback(value, job.authUrl);
       job.lastFetchGen = job.curGen;
