@@ -39,7 +39,7 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
   const hint = document.createElement('p'); hint.textContent = 'The backend uses the official recorder, runs the real commands and uploads a separate archive for each lab. Google credentials are cleared after the job.';
   panel.append(title, status, instructions, login, callback, finish, retry, hint);
   document.body.append(panel);
-  let authUrl;
+  let authUrl, refreshed = false;
   login.onclick = () => { if (authUrl) window.open(authUrl, 'tds-termlog-google-login', 'width=780,height=820'); };
   finish.onclick = async () => {
     finish.disabled = true;
@@ -56,13 +56,17 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
     const deadline = Date.now() + 20 * 60 * 1000;
     while (Date.now() < deadline) {
       const job = await request('/labs/job/' + started.id, undefined, started.token);
-      status.textContent = job.message + (job.diag ? ' [' + job.diag.slice(0, 160) + ']' : '');
-      if (job.authUrl && !authUrl) {
+      status.textContent = job.message + (refreshed ? ' (Link was refreshed — open sign-in again, use the NEW localhost URL.)' : '') + (job.diag ? ' [' + job.diag.slice(0, 160) + ']' : '');
+      if (job.authUrl && job.authUrl !== authUrl) {
         const url = new URL(job.authUrl);
         if (url.hostname !== 'accounts.google.com' || url.protocol !== 'https:') throw new Error('Unexpected Google sign-in address.');
+        const first = !authUrl;
         authUrl = url.href; login.disabled = false;
-        status.textContent = 'Google sign-in is ready — open it NOW. The login expires 5 minutes after this panel appeared.';
-        console.info('[signed labs] Panel ready for ' + email + '. Complete Google sign-in + paste within 5 minutes; codes are single-use.');
+        if (!first) refreshed = true;
+        status.textContent = first
+          ? 'Google sign-in is ready — open it NOW. The login expires 5 minutes after this panel appeared.'
+          : 'Sign-in link refreshed — open Google sign-in again and use the NEW localhost URL. Old codes are dead.';
+        console.info('[signed labs] Panel ready for ' + email + (first ? '. Complete Google sign-in + paste within 5 minutes; codes are single-use.' : ' (link refreshed).'));
       }
       for (const [qid, value] of Object.entries(job.artifacts || {})) {
         const url = new URL(value, backend).href;

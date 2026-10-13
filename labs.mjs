@@ -164,36 +164,55 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
       const tasks = [...new Set(input.tasks || ['decode','httpbin','model'])];
       if (!tasks.length || tasks.some((task) => !(task in taskIds))) throw new Error('Unknown lab tasks.');
       const challengeUrl = tasks.includes('decode') ? validateChallengeUrl(input.challengeUrl, email) : null;
-      if ([...jobs.values()].filter((job) => !['complete','error'].includes(job.status)).length >= 4) throw new Error('Four sign-in or recording jobs are already active. Retry shortly.');
+      if ([...jobs.values()].filter((job) => !['complete','error'].includes(job.status)).length >= 8) throw new Error('Eight sign-in or recording jobs are already active. Retry shortly.');
       const ready = await this.health(); if (!ready.available) throw new Error(ready.error);
       const id = crypto.randomUUID(), token = crypto.randomBytes(32).toString('base64url');
       const dir = join(dataDir, 'lab-jobs', id), authDir = join(dir, 'auth'); await mkdir(authDir, { recursive: true, mode: 0o700 });
       await mkdir(join(dir, 'config'), { recursive: true, mode: 0o700 });
-      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Starting Google sign-in.', artifacts: {}, created: Date.now(), loginStarted: Date.now(), loginDiag: '' };
+      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Starting Google sign-in.', artifacts: {}, created: Date.now(), loginStarted: Date.now(), loginDiag: '', respawns: 0, callbackAttempted: false };
       jobs.set(id, job);
       const env = { ...process.env, TERMLOG_STATE_HOME: authDir, TERMLOG_CONFIG_HOME: join(dir, 'config') };
       delete env.TERMLOG_ALLOW_DEV_AUTH;
-      const child = spawn(termlog, ['login'], { env, stdio: ['ignore','pipe','pipe'] });
-      job.login = child;
-      const loginStarted = Date.now();
-      let output = '', stderrTail = '';
-      child.stdout.on('data', (data) => {
-        output = (output + data).slice(-16000);
-        const match = output.match(/https:\/\/accounts\.google\.com\/[^\s]+/);
-        if (match && !job.authUrl) {
-          job.authUrl = match[0]; const url = new URL(job.authUrl); url.searchParams.set('login_hint', email);
-          job.publicAuthUrl = url.href; job.status = 'authentication'; job.message = 'Sign in with your registered Google email, then return the localhost callback URL.';
-        }
-      });
-      child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = redact(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
-      child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = redact(stderrTail); await rm(dir, { recursive: true, force: true }); });
-      child.on('close', (code, signal) => {
-        delete job.login;
-        job.loginDiag = redact(stderrTail);
-        if (code === 0) void execute(job);
-        else if (Date.now() - loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Repaste the helper for a fresh job and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
-        else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ' No termlog error text; the login popup may have been closed.'} Start a new job.`; console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - loginStarted) / 1000)}s stderr=${tail.slice(0, 300)}`); void rm(dir, { recursive: true, force: true }); }
-      });
+      // Self-healing login: the official binary fail-closes its loopback
+      // listener on the first stateless contact (and a closed popup means the
+      // user just reopens it). While no callback has been attempted, a dead
+      // listener is silently replaced so one stray hit never kills the job.
+      const spawnLogin = () => {
+        const child = spawn(termlog, ['login'], { env, stdio: ['ignore','pipe','pipe'] });
+        job.login = child;
+        job.loginStarted = Date.now();
+        let output = '', stderrTail = '';
+        child.stdout.on('data', (data) => {
+          output = (output + data).slice(-16000);
+          const match = output.match(/https:\/\/accounts\.google\.com\/[^\s]+/);
+          if (match) {
+            const fresh = match[0];
+            if (fresh !== job.authUrl) {
+              job.authUrl = fresh; const url = new URL(fresh); url.searchParams.set('login_hint', email);
+              job.publicAuthUrl = url.href;
+              if (job.status !== 'authentication' || job.respawns > 0) job.message = 'Sign in with your registered Google email, then return the localhost callback URL.';
+              job.status = 'authentication';
+            }
+          }
+        });
+        child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = redact(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
+        child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = redact(stderrTail); await rm(dir, { recursive: true, force: true }); });
+        child.on('close', (code, signal) => {
+          delete job.login;
+          job.loginDiag = redact(stderrTail);
+          if (code === 0) { void execute(job); return; }
+          console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - job.loginStarted) / 1000)}s attempted=${job.callbackAttempted} respawns=${job.respawns} stderr=${redact(stderrTail).trim().slice(0, 300)}`);
+          if (!job.callbackAttempted && (job.status === 'starting' || job.status === 'authentication') && job.respawns < 5) {
+            job.respawns++;
+            job.message = 'Login listener restarted — use the current sign-in link below.';
+            spawnLogin();
+            return;
+          }
+          if (Date.now() - job.loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Use “Start fresh job” in the panel and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
+          else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - job.loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ''} Use “Start fresh job” in the panel.`; void rm(dir, { recursive: true, force: true }); }
+        });
+      };
+      spawnLogin();
       return { id, token };
     },
     get(id, token) {
@@ -203,7 +222,8 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
     },
     async callback(id, token, value) {
       this.get(id, token); const job = jobs.get(id);
-      if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Start a new job for a fresh sign-in.`);
+      if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Use “Start fresh job” in the panel.`);
+      job.callbackAttempted = true;
       const url = validateCallback(value, job.authUrl);
       // Forward only to the exact loopback port created by this job's official CLI.
       let response;
