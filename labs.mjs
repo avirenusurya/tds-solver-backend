@@ -1,33 +1,10 @@
 import { spawn } from 'node:child_process';
-import net from 'node:net';
 import { once } from 'node:events';
 import { mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import crypto from 'node:crypto';
 
 const quote = (value) => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
-const redact = (text) => String(text || '').replace(/(code|state|refresh_token|id_token|access_token|client_secret)=[^&\s"']+/g, '$1=REDACTED').slice(-500);
-// Headless servers have no browser; termlog says so on every login. Expected
-// noise — never show it in the panel.
-const cleanDiag = (text) => redact(text).replace(/!!! Could not launch browser automatically:[^\n]*\n?/g, '').trim();
-// Forward the pasted localhost callback with a single atomic socket write.
-// termlog parses its listener input with one read, so a fragmented HTTP
-// request can look like a stateless hit and kill the login.
-const forwardCallback = (url) => new Promise((resolve, reject) => {
-  const port = Number(url.port || 80);
-  if (!Number.isInteger(port) || port <= 0) return reject(new Error('bad callback port'));
-  const sock = net.connect({ host: '127.0.0.1', port });
-  let data = '';
-  const done = (error) => { sock.destroy(); error ? reject(error) : resolve(data); };
-  sock.setTimeout(10000);
-  sock.on('connect', () => {
-    sock.write(`GET ${url.pathname}${url.search} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
-  });
-  sock.on('data', (chunk) => { data += chunk.toString(); if (data.length > 16384) done(new Error('oversize callback response')); });
-  sock.on('close', () => done(data ? null : new Error('listener closed without a response')));
-  sock.on('error', done);
-  sock.on('timeout', () => done(new Error('timeout reaching the login listener')));
-});
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const taskIds = { decode: 'q-termlog-rec-server', httpbin: 'q-termlog-httpbin-server', model: 'q-termlog-ollama-modelfile-server' };
 const hashEmail = (email) => {
@@ -43,6 +20,20 @@ export function validateChallengeUrl(value, email) {
     || normalizeEmail(url.searchParams.get('email')) !== normalizeEmail(email)
     || !url.searchParams.get('quizSign')) throw new Error('A current, personal GA1 challenge URL is required.');
   return url.href;
+}
+
+// Bring-your-own login: the user runs `termlog login` on their own machine
+// (same-machine browser flow, always works) and pastes auth.json. The server
+// never sees a password; the cache is wiped with the job directory.
+export function validateAuthCache(cache, email) {
+  if (!cache || typeof cache !== 'object' || Array.isArray(cache)) throw new Error('Paste your termlog auth.json contents (JSON).');
+  if (cache.dev) throw new Error('Development logins are rejected; run a real `termlog login` locally.');
+  const claims = cache.claims || {};
+  if (normalizeEmail(claims.email) !== normalizeEmail(email)) throw new Error('That login is for a different Google email. Log in locally with your exam email.');
+  if (typeof cache.id_token !== 'string' || !cache.id_token) throw new Error('Login file is missing its token; run `termlog login` again locally.');
+  if (typeof claims.exp !== 'number') throw new Error('Login file is missing its expiry; run `termlog login` again locally.');
+  if (claims.exp <= Date.now() / 1000 + 60 && typeof cache.refresh_token !== 'string') throw new Error('That Google login expired and has no refresh token; run `termlog login` again locally.');
+  return cache;
 }
 
 export function validateCallback(value, authUrl) {
@@ -191,59 +182,19 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
       const id = crypto.randomUUID(), token = crypto.randomBytes(32).toString('base64url');
       const dir = join(dataDir, 'lab-jobs', id), authDir = join(dir, 'auth'); await mkdir(authDir, { recursive: true, mode: 0o700 });
       await mkdir(join(dir, 'config'), { recursive: true, mode: 0o700 });
-      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Starting Google sign-in.', artifacts: {}, created: Date.now(), loginStarted: Date.now(), loginDiag: '', respawns: 0, callbackAttempted: false };
+      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Checking your login.', artifacts: {}, created: Date.now(), loginDiag: '' };
       jobs.set(id, job);
-      const env = { ...process.env, TERMLOG_STATE_HOME: authDir, TERMLOG_CONFIG_HOME: join(dir, 'config') };
-      delete env.TERMLOG_ALLOW_DEV_AUTH;
-      // Self-healing login: the official binary fail-closes its loopback
-      // listener on the first stateless contact (and a closed popup means the
-      // user just reopens it). While no callback has been attempted, a dead
-      // listener is silently replaced so one stray hit never kills the job.
-      // Respawn waits 2s so the panel link settles instead of rotating under
-      // the user's cursor; generation tracking tells Render logs whether the
-      // dead listener ever received our own callback forward.
-      const spawnLogin = () => {
-        const myGen = job.respawns;
-        job.curGen = myGen;
-        const child = spawn(termlog, ['login'], { env, stdio: ['ignore','pipe','pipe'] });
-        job.login = child;
-        job.loginStarted = Date.now();
-        let output = '', stderrTail = '';
-        child.stdout.on('data', (data) => {
-          output = (output + data).slice(-16000);
-          const match = output.match(/https:\/\/accounts\.google\.com\/[^\s]+/);
-          if (match) {
-            const fresh = match[0];
-            if (fresh !== job.authUrl) {
-              job.authUrl = fresh; const url = new URL(fresh); url.searchParams.set('login_hint', email);
-              job.publicAuthUrl = url.href;
-              const portHint = (() => { try { return new URL(fresh).port; } catch { return ''; } })();
-              job.message = `Sign in with this exam email, then return the localhost callback URL (your URL must contain :${portHint}).`;
-              job.status = 'authentication';
-            }
-          }
-        });
-        child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = cleanDiag(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
-        child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = cleanDiag(stderrTail); await rm(dir, { recursive: true, force: true }); });
-        child.on('close', (code, signal) => {
-          delete job.login;
-          job.loginDiag = cleanDiag(stderrTail);
-          if (code === 0) { void execute(job); return; }
-          console.error(`[labs] login ${job.id} email=${job.email} exit=${code ?? signal} after=${Math.round((Date.now() - job.loginStarted) / 1000)}s attempted=${job.callbackAttempted} gen=${myGen} fetchedGen=${job.lastFetchGen ?? -1} respawns=${job.respawns} stderr=${cleanDiag(stderrTail).slice(0, 300)}`);
-          if (!job.callbackAttempted && (job.status === 'starting' || job.status === 'authentication') && job.respawns < 5) {
-            const token = job.respawns;
-            job.respawns++;
-            job.message = 'Login listener restarted — wait for the link below to settle, then open it. Old codes are dead.';
-            setTimeout(() => {
-              if (job.respawns - 1 === token && !job.callbackAttempted && (job.status === 'starting' || job.status === 'authentication') && !job.login) spawnLogin();
-            }, 2000);
-            return;
-          }
-          if (Date.now() - job.loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Use “Start fresh job” in the panel and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
-          else { const tail = cleanDiag(stderrTail); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - job.loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ''} Use “Start fresh job” in the panel.`; void rm(dir, { recursive: true, force: true }); }
-        });
-      };
-      spawnLogin();
+      // Bring-your-own login: the browser sign-in flow cannot survive this
+      // host's localhost probing, so the user logs in locally (same machine,
+      // always works) and pastes auth.json. No listener, no race, no timeout.
+      if (input.authCache === undefined) throw new Error('Paste your local termlog login: run `termlog login` with your exam email, then paste auth.json.');
+      let cache;
+      try { cache = validateAuthCache(typeof input.authCache === 'string' ? JSON.parse(input.authCache) : input.authCache, email); }
+      catch (error) { jobs.delete(id); throw error; }
+      await writeFile(join(authDir, 'auth.json'), JSON.stringify(cache), { mode: 0o600 });
+      job.status = 'queued';
+      job.message = 'Login received. Waiting for the recording worker.';
+      void execute(job).catch(() => {});
       return { id, token };
     },
     get(id, token) {
@@ -252,25 +203,8 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
       return { id: job.id, email: job.email, status: job.status, message: job.message, authUrl: job.publicAuthUrl, artifacts: job.artifacts, diag: job.loginDiag || '' };
     },
     async callback(id, token, value) {
-      this.get(id, token); const job = jobs.get(id);
-      if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Use “Start fresh job” in the panel.`);
-      if (!job.login) {
-        // Listener respawn in flight: wait for the fresh link instead of
-        // failing against a dead port.
-        const deadline = Date.now() + 5000;
-        while (!job.login && Date.now() < deadline && job.status === 'authentication') await new Promise((r) => setTimeout(r, 200));
-        if (!job.login) throw new Error('The login listener is restarting — wait a few seconds, open the sign-in link again and paste the newest URL.');
-        if (job.status !== 'authentication') throw new Error(`This job is ${job.status}: ${job.message} Use “Start fresh job” in the panel.`);
-      }
-      job.callbackAttempted = true;
-      const url = validateCallback(value, job.authUrl);
-      job.lastFetchGen = job.curGen;
-      // Forward only to the exact loopback port created by this job's official CLI.
-      let head;
-      try { head = await forwardCallback(new URL(url)); }
-      catch (error) { throw new Error(`Could not reach the login listener on this job's port (${error.message}). Use the panel's “Start fresh job” and paste the new URL.`); }
-      if (!/^HTTP\/1\.1 200/.test(head)) throw new Error("The login listener refused the callback. Re-open THIS job's Google link and copy the fresh localhost URL.");
-      return { ok: true };
+      this.get(id, token);
+      throw new Error('Browser sign-in is retired on this host; paste your local auth.json instead.');
     },
   };
 }

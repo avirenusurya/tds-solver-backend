@@ -21,64 +21,53 @@ export async function runSignedLabs({ backend, email, challengeUrl = null, tasks
     if (!response.ok) throw new Error(result.error || 'Signed-lab service failed.');
     return result;
   };
-  const started = await request('/labs/start', { email, challengeUrl, tasks: needed });
-  // One panel per page: repasting replaces the stale panel (and its dead job)
-  // instead of stacking confusing duplicates.
+  // One panel per page: repasting replaces the stale panel instead of
+  // stacking confusing duplicates.
   document.querySelectorAll('.tds-labs-panel').forEach((el) => el.remove());
   const panel = document.createElement('section');
   panel.className = 'tds-labs-panel';
-  panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:440px;padding:18px;border:1px solid #555;border-radius:10px;background:#fff;color:#111;box-shadow:0 8px 28px #0004;font:14px/1.5 system-ui';
+  panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:460px;padding:18px;border:1px solid #555;border-radius:10px;background:#fff;color:#111;box-shadow:0 8px 28px #0004;font:14px/1.5 system-ui';
   const title = document.createElement('strong'); title.textContent = 'Signed terminal labs — ' + email;
-  const status = document.createElement('p'); status.textContent = 'Starting…';
+  const status = document.createElement('p'); status.textContent = 'Waiting for your login file.';
   const instructions = document.createElement('p');
-  instructions.textContent = 'Sign in with this exam email NOW — the official login waits at most 5 minutes. After Google sign-in, the popup reaches a localhost address. Copy its complete address below so the backend can finish the callback. Each code is single-use: always use the fresh URL from THIS panel.';
-  const login = document.createElement('button'); login.type = 'button'; login.textContent = 'Open Google sign-in'; login.disabled = true;
-  const callback = document.createElement('input'); callback.type = 'url'; callback.placeholder = 'http://127.0.0.1:…/?state=…&code=…'; callback.style.cssText = 'display:block;width:100%;margin:12px 0';
-  const finish = document.createElement('button'); finish.type = 'button'; finish.textContent = 'Complete sign-in';
-  const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Start fresh job'; retry.style.cssText = 'margin-left:8px'; retry.hidden = true;
-  const hint = document.createElement('p'); hint.textContent = 'The backend uses the official recorder, runs the real commands and uploads a separate archive for each lab. Google credentials are cleared after the job.';
-  panel.append(title, status, instructions, login, callback, finish, retry, hint);
+  instructions.textContent = 'On your own machine: install termlog, run `termlog login` with this exam email, then run `cat ~/.local/state/termlog/auth.json` and paste the whole JSON below. The backend records the real labs with it and wipes it afterwards.';
+  const paste = document.createElement('textarea'); paste.rows = 4; paste.placeholder = '{"client_id": "…", "id_token": "…", …}'; paste.style.cssText = 'display:block;width:100%;margin:12px 0;font:12px monospace';
+  const upload = document.createElement('button'); upload.type = 'button'; upload.textContent = 'Upload login & record';
+  const hint = document.createElement('p'); hint.textContent = 'No Google password is typed here — only the local login file. Each login is single-use per job.';
+  panel.append(title, status, instructions, paste, upload, hint);
   document.body.append(panel);
-  let authUrl, refreshed = false;
-  login.onclick = () => { if (authUrl) window.open(authUrl, 'tds-termlog-google-login', 'width=780,height=820'); };
-  finish.onclick = async () => {
-    finish.disabled = true;
-    try {
-      const pasted = callback.value.trim();
-      if (!/^http:\/\/127\.0\.0\.1:\d+\/\?/.test(pasted)) throw new Error('That does not look like the localhost callback. Copy the FULL address from the sign-in popup (http://127.0.0.1:PORT/?state=...&code=...).');
-      await request('/labs/job/' + started.id + '/callback', { callbackUrl: pasted }, started.token);
-      callback.value = ''; callback.disabled = true; login.disabled = true;
-      status.textContent = 'Google callback received. Recording the labs…';
-    } catch (error) { status.textContent = error.message; console.error('[signed labs callback]', error.message); finish.disabled = false; }
-  };
-  retry.onclick = () => { panel.remove(); runSignedLabs({ backend, email, challengeUrl, tasks, onArtifact }).catch((error) => console.error('[signed labs]', error.message)); };
-  try {
+  let started = null;
+  const poll = async () => {
     const deadline = Date.now() + 20 * 60 * 1000;
     while (Date.now() < deadline) {
       const job = await request('/labs/job/' + started.id, undefined, started.token);
-      status.textContent = job.message + (refreshed ? ' (Link was refreshed — open sign-in again, use the NEW localhost URL.)' : '') + (job.diag ? ' [' + job.diag.slice(0, 160) + ']' : '');
-      if (job.authUrl && job.authUrl !== authUrl) {
-        const url = new URL(job.authUrl);
-        if (url.hostname !== 'accounts.google.com' || url.protocol !== 'https:') throw new Error('Unexpected Google sign-in address.');
-        const first = !authUrl;
-        authUrl = url.href; login.disabled = false;
-        if (!first) { refreshed = true; callback.value = ''; }
-        status.textContent = first
-          ? 'Google sign-in is ready — open it NOW. The login expires 5 minutes after this panel appeared.'
-          : 'Sign-in link refreshed — open Google sign-in again and use the NEW localhost URL. Old codes are dead.';
-        console.info('[signed labs] Panel ready for ' + email + (first ? '. Complete Google sign-in + paste within 5 minutes; codes are single-use.' : ' (link refreshed).'));
-      }
+      status.textContent = job.message;
       for (const [qid, value] of Object.entries(job.artifacts || {})) {
         const url = new URL(value, backend).href;
         if (cached[qid] !== url) { cached[qid] = url; localStorage.setItem(cacheKey(email), JSON.stringify(cached)); onArtifact(qid, url); }
       }
       if (job.status === 'complete') { panel.remove(); return cached; }
-      if (job.status === 'error') {
-        login.disabled = true; callback.disabled = true; finish.disabled = true; retry.hidden = false;
-        throw new Error(job.message + ' Use “Start fresh job” in the panel (no repaste needed) and complete it within 5 minutes.');
-      }
+      if (job.status === 'error') throw new Error(job.message);
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
-    throw new Error('Signed-lab job timed out. Restart the helper to begin a new sign-in.');
-  } catch (error) { status.textContent = error.message; throw error; }
+    throw new Error('Signed-lab job timed out. Paste your login again to begin a new job.');
+  };
+  upload.onclick = async () => {
+    upload.disabled = true;
+    try {
+      const text = paste.value.trim();
+      if (!text.startsWith('{')) throw new Error('Paste the whole auth.json contents (it starts with {).');
+      let authCache;
+      try { authCache = JSON.parse(text); }
+      catch { throw new Error('That is not valid JSON. Copy auth.json exactly, without edits.'); }
+      status.textContent = 'Login received. Starting the recording…';
+      started = await request('/labs/start', { email, challengeUrl, tasks: needed, authCache });
+      paste.value = '';
+      await poll();
+    } catch (error) {
+      status.textContent = error.message;
+      console.error('[signed labs]', error.message);
+      paste.disabled = false; upload.disabled = false;
+    }
+  };
 }

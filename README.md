@@ -30,7 +30,7 @@ Ledger and archive files use `DATA_DIR` (default `./data`). They survive Node pr
 
 ## Automatic signed terminal labs
 
-The scripts now show a Google sign-in panel when signed archives are missing. The backend runs the official termlog binary separately for each student, executes the real lab commands through a terminal, verifies each recording, packages its unchanged bytes and uploads it to Catbox. If Catbox is unavailable, it hosts the archive on the backend.
+The scripts show a login panel when signed archives are missing. Log in once on your own machine with the official termlog binary using your exam email, then paste your local `auth.json` (`cat ~/.local/state/termlog/auth.json`) into the panel. The backend verifies the email, runs the real lab commands through a terminal, verifies each recording, packages its unchanged bytes and uploads it to Catbox. If Catbox is unavailable, it hosts the archive on the backend. Pasted logins are wiped with the job directory afterwards; no Google password is ever typed into the solver.
 
 Sign in using the displayed exam email. Google's native-client callback points to a localhost address; copy that complete address from the sign-in popup into the panel. The backend forwards it only to that job's official CLI listener, which completes Google's PKCE exchange and validates the identity. No Google password is entered into the solver. Temporary Google credentials and challenge files are deleted after the job.
 

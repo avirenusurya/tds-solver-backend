@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { labCommands, validateCallback, validateChallengeUrl } from './labs.mjs';
+import { labCommands, validateAuthCache, validateCallback, validateChallengeUrl } from './labs.mjs';
 
 test('OAuth callback is bound to this login port and state; external and other local requests are refused', () => {
   const auth = 'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A54321&state=one-job';
@@ -22,6 +22,17 @@ test('personal challenge links cannot fetch a different account or an arbitrary 
   assert.throws(() => validateChallengeUrl('https://example.invalid/', 'learner@example.invalid'));
   const commands = labCommands('decode', 'learner@example.invalid', url);
   assert.equal(commands.filter((command) => command.includes('cat cipher.txt |')).length, 6);
+});
+
+test('pasted logins must match the exam email, carry a token, and reject dev caches', () => {
+  const fresh = { client_id: 'google-client', id_token: 'token', refresh_token: 'refresh', claims: { email: 'learner@example.invalid', exp: Date.now() / 1000 + 3600 } };
+  assert.equal(validateAuthCache(fresh, 'learner@example.invalid'), fresh);
+  assert.deepEqual(validateAuthCache(JSON.parse(JSON.stringify(fresh)), 'LEARNER@example.invalid'), fresh);
+  assert.throws(() => validateAuthCache({ ...fresh, claims: { ...fresh.claims, email: 'other@example.invalid' } }, 'learner@example.invalid'), /different Google email/);
+  assert.throws(() => validateAuthCache({ ...fresh, dev: true }, 'learner@example.invalid'), /Development/);
+  assert.throws(() => validateAuthCache({ ...fresh, id_token: '' }, 'learner@example.invalid'), /missing its token/);
+  assert.throws(() => validateAuthCache({ ...fresh, refresh_token: undefined, claims: { ...fresh.claims, exp: Date.now() / 1000 - 10 } }, 'learner@example.invalid'), /expired/);
+  for (const bad of [null, 'text', [], 42]) assert.throws(() => validateAuthCache(bad, 'learner@example.invalid'));
 });
 
 test('lab command generation uses real HTTP requests and per-student model configurations', () => {
