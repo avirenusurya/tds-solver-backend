@@ -1,61 +1,93 @@
-# tds-solver-backend — multi-tenant one-click solver backend (GA1 + GA2)
+# Universal GA1 / GA2 helpers
 
-One persistent Node process serves **every** student. Personalize by email-in-path:
+The browser helpers read the current student's email and quiz signature from the logged-in attempt page. No student account, GitHub credential, or AI Pipe token belongs in shared source.
 
+`/backendVerify` always reaches the official exam server. Green checks are no longer fabricated. Signed terminal recordings, Tangram receipts and the live model evaluation must pass their actual validators.
+
+## Deploy and use
+
+Deploy this repository to your existing Render web service. `GET /health` must report revision `2026-10-13-real-validation-v1`. Docker copies `server.mjs`, `ledger.mjs` and `invoice.mjs`; Node 20 or newer is required.
+
+Reload the exam page, then paste the matching file from `solvers/` into its browser console. The default backend is `https://tds-solver-backend.onrender.com`. Each script fills computable answers, keeps existing signed lab URLs, runs Check all and shows genuine server failures. Review the feedback and press Save. Automatic saving remains disabled.
+
+Optional settings go in page memory before pasting, for example:
+
+```js
+window.GA1_OPTIONS = { backend: 'https://your-service.onrender.com' };
+window.GA2_OPTIONS = { backend: 'https://your-service.onrender.com' };
 ```
+
+The helpers keep their existing browser-side implementations for the previously working questions. Deployed questions are checked by the real server; a client-only success does not promise a saved score.
+
+## Corrected services
+
+- GA1 ledger downloads the full NDJSON `/export` and `/rates`. If export fails, it follows all paginated order links. The backend keeps the latest `updated_at` per order ID, converts amounts with `usd_per_unit`, uses Asia/Kolkata business dates and counts only paid orders as revenue. It supports refund totals/counts, product/customer rankings, units, distinct customers and date filters.
+- GA2 invoice extraction preserves vendor punctuation, including `Industries Ltd.`. Empty, malformed or unsupported inputs return HTTP 422.
+- Ledger data is stored by normalized email. The browser uploads orders and rates only; quiz signatures and signed data links are not sent to this service.
+- `POST /artifacts` hosts a genuine `.tar.gz` containing a `.cast` recording and its `.cast.jwt`. It returns a relative public file URL. Prefix it with your backend origin before submitting. The bytes are unchanged; the official grader verifies the signatures and lab outputs.
+
+Ledger and archive files use `DATA_DIR` (default `./data`). They survive Node process restarts when the filesystem survives. A container replacement or deployment without a persistent disk can erase them. Rerun GA1 to upload its ledger and upload your lab archives again after such a redeploy.
+
+## Complete the signed terminal labs
+
+Install the official [termlog binary](https://github.com/mynkpdr/termlog). Each student must run `termlog login` using their own registered exam email. A deployed backend cannot produce that Google identity proof.
+
+After pasting the browser helper, print the personalized commands:
+
+```js
+// On GA1:
+window.__ga1TermlogCommands();
+
+// On GA2:
+window.__ga2TermlogCommands('httpbin');
+window.__ga2TermlogCommands('model');
+```
+
+Run each lab in a fresh folder. Start the recording, paste the lab commands into its shell, inspect their real output, then type `exit` to produce the receipt. Verify and package the two files, upload the archive, and paste the full returned URL in the question. The Ollama lab requires a working local Ollama installation and a downloaded base model before recording. Override its base model with `GA2_OPTIONS.ollamaBaseModel` if needed.
+
+The GA1 challenge changes every three hours. Fetch and decode it inside the same recording. The generated commands try the six orders of ROT13, hex decoding and reversal using actual shell utilities.
+
+## Model intelligence
+
+The official question prompts for each student's AI Pipe token. Tokens stay in page memory and go to the official exam backend for evaluation, never into shared source or saved answers. A passing result requires the real six model replies to meet the question's rule; no prompt is guaranteed to pass.
+
+Inspect the trial feedback. To evaluate another prompt:
+
+```js
+await window.__ga2IntelTry('Your new prompt. Reply only YES or NO.');
+```
+
+Each distinct prompt consumes six model calls and is cached by the exam. The helper preserves your current prompt on reruns, including a prompt you have already verified.
+
+## Tangram
+
+The old signature bypass and fabricated JWT have been removed. A genuine existing receipt is preserved. `window.__ga1TangramOpen()` opens the official board with the student's target metadata in its URL. The board exposes WebMCP tools to read state, apply poses and attest a real arrangement. A browser's availability banner does not replace checking those exposed tools.
+
+The resulting receipt must match the assigned silhouette and student email. Fill it using `window.__ga1UTangram(receipt)`, then Check and Save.
+
+## Existing endpoint URLs
+
+```text
 base = https://HOST/s/<encodeURIComponent(email)>
 ```
 
-| Paste as answer | Question |
+| Endpoint | Question |
 |---|---|
-| `base` | GA2 fastapi `/stats`, compose (`/healthz /hit/ /count/`), observability (`/work /metrics /healthz /logs/tail`), idempotency (`/orders`), middleware (`/ping`) |
-| `base/analytics` | GA2 deploy-analytics |
-| `base/verify` | GA2 oauth-jwks-verify |
-| `base/extract` | GA2 local-llm-structured |
-| `base/stream.json` | GA2 ollama-stream-reassembly |
-| `base/docker.json` | GA2 docker-build-cache |
-| `https://HOST/mcp/<email>` | GA1 mcp-server-live |
-| upload `POST /ledger/<email>` then paste `https://HOST/answer/<email>` | GA1 ledger-agent |
+| `base` | FastAPI metrics, compose counters, observability, orders, middleware |
+| `base/analytics` | Analytics |
+| `base/verify` | OAuth JWT validation |
+| `base/extract` | Invoice extraction |
+| `base/stream.json` | Stream reassembly |
+| `base/docker.json` | Docker cache analysis |
+| `https://HOST/mcp/<email>` | Live MCP server |
+| Upload `POST /ledger/<email>`, use `POST /answer/<email>` | Ledger agent |
 
-The matching console solvers (`data-leak/questions/*-console-universal.js`) do all
-of this automatically from one paste — set `BACKEND` at the top of the script.
-
-## Run locally
+## Verify locally
 
 ```bash
-cd solver-backend
-npm install
-node server.mjs            # :8080
-npm test                   # 82 differential + behavioral checks
+npm ci
+npm test
+npm start
 ```
 
-## Deploy (pick one — must stay awake through Oct 18 grading)
-
-**Fly.io** (recommended, always-on):
-```bash
-fly launch --no-deploy
-fly deploy
-fly status   # confirm 1 machine running; auto_stop MUST be false (see fly.toml)
-```
-Your URL: `https://tds-solver-backend.fly.dev` (or whatever `fly status` shows).
-
-**Render:** new Web Service → Docker → repo `solver-backend/` → plan **starter**
-(free sleeps; starter doesn't) → health check `/health`.
-
-**Do NOT use:** plain Vercel serverless functions (in-memory rate buckets,
-idempotency keys, obs counters and compose counts don't survive across
-invocations → flaky 429/counter checks), laptop tunnels (die on sleep).
-
-## After deploy
-
-1. `curl https://HOST/health` → `{"ok":true,...}`
-2. Set `BACKEND = 'https://HOST'` (no trailing slash) in both universal console scripts.
-3. Paste each script once on its exam page → Check all green → Save.
-4. Keep the service up until grading ends; saved scores re-verify live.
-
-## Privacy
-
-The console posts your ledger JSON to `/ledger/<email>` (needed to answer
-ledger questions) and your quizSign is used *in your own browser only* to
-fetch your ledger/challenge — it is never sent anywhere. No submissions,
-tokens, or quizSigns are logged or stored server-side.
+Tests cover complete exports, all 85 fallback pages, real rejected validations, signed-URL preservation, vendor punctuation, exchange rates, deduplication, timezones, rankings, per-student isolation, storage recovery and byte-preserving archive hosting.

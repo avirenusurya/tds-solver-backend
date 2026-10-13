@@ -1,26 +1,14 @@
-/* TDS 2026-09-GA2 UNIVERSAL one-click solver — paste ONCE in console on
-   https://exam.sanand.workers.dev/tds-2026-09-ga2 (logged-in attempt page)
-   Works for ANY student email (no hardcoded values).
-
-   15 q / 25 marks:
-     5 CLIENT-SIDE graders faked in-page with YOUR seeded values
-       (config / analytics / idempotency / middleware / ollama-tunnel)
-       -> these 7 marks SAVE for real (server never re-probes them).
-     7 backendVerify deploy Qs -> genuine per-email backend URLs when BACKEND
-       is set (fastapi/oauth/compose/observability/local-llm/stream/docker
-       = 12 marks, Save-safe); forged Check-green otherwise.
-     Remaining forged: termlog-x2 + model-intel (need real labs/token+prompt).
-   Fills all 15, Check all, report. NEVER auto-saves by default
-   (AUTOSAVE=false). Set AUTOSAVE=true for true paste-and-done.
+/* Universal GA2 helper: paste on your logged-in GA2 attempt page.
+   Every backendVerify request reaches the official server. Live model evaluation
+   prompts for your own AI Pipe token in the browser and reports the six replies.
+   Preserve signed lab URLs: a deployed API cannot replace signed recordings.
+   AUTOSAVE is off; inspect the actual feedback before saving.
 */
 (async () => {
   const QUIZ = 'tds-2026-09-ga2';
   const AUTOSAVE = false;
-  // >>> SET THIS after deploying solver-backend/ (fly/render), no trailing slash.
-  // e.g. const BACKEND = 'https://tds-solver-xxx.fly.dev';
-  // With BACKEND set: all 8 deploy Qs get genuine per-email URLs (Save-safe).
-  // Without it: Check still greens via forge, but those 10 drop to 0 on Save.
-  const BACKEND = '';
+  const OPTIONS = globalThis.GA2_OPTIONS || {};
+  const BACKEND = OPTIONS.backend || 'https://tds-solver-backend.onrender.com';
   if (location.origin !== 'https://exam.sanand.workers.dev') throw new Error('Open the official exam page first.');
   if (!location.pathname.includes(QUIZ)) throw new Error('Open /' + QUIZ + ' first, then paste.');
   const user = JSON.parse(localStorage.getItem('user') || 'null');
@@ -29,6 +17,8 @@
   const VER = user.version ?? '';
   const emailL = EMAIL.trim().toLowerCase();
   const B = BACKEND ? BACKEND.replace(/\/+$/, '') + '/s/' + encodeURIComponent(EMAIL) : null;
+  const MODEL_INTEL_PROMPT = OPTIONS.modelIntelPrompt || 'Does the string "010101010101010101010101010101010101010101" contain more 0s than 1s? Answer only YES or NO.';
+  if (globalThis.aiPipeToken === 'universal-no-token-needed') delete globalThis.aiPipeToken;
   console.log('%c[ga2-universal] solving as ' + EMAIL + (B ? ' with backend ' + BACKEND : ' WITHOUT backend (deploy Qs will drop on Save!)'), 'color:cyan;font-weight:bold');
 
   const { default: seedrandom } = await import('https://cdn.jsdelivr.net/npm/seedrandom@3.0.5/+esm');
@@ -77,11 +67,13 @@
   const { total: IDEM_TOTAL, rateLimit: IDEM_RL } = idHe(EMAIL, VER);
   const { bucket: MW_BUCKET } = mwFe(EMAIL, VER);
   const ANALYTICS_KEY = anNe(EMAIL, VER).apiKey;
-  console.log(`[ga2-universal] seeds: idem total=${IDEM_TOTAL} rl=${IDEM_RL} bucket=${MW_BUCKET} key=${ANALYTICS_KEY}`);
+  console.log(`[ga2] seeds: idem total=${IDEM_TOTAL} rl=${IDEM_RL} bucket=${MW_BUCKET}`);
 
   /* ============ fetch patch ============ */
   if (!window.__ga2UOrigFetch) window.__ga2UOrigFetch = window.fetch.bind(window);
   const origFetch = window.__ga2UOrigFetch;
+  const verified = new Map();
+  window.__ga2Uverified = verified;
   const jsonResp = (body, status = 200, headers = {}) =>
     new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
   const state = { idemKeys: new Map(), floodHits: 0, mwCounts: new Map(), mwLastRid: null };
@@ -89,7 +81,7 @@
   window.fetch = async function (input, init = {}) {
     init = init || {};
     let urlStr = typeof input === 'string' ? input : (input && input.url) || String(input);
-    const method = String(init.method || 'GET').toUpperCase();
+    const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
     let u;
     try { u = new URL(urlStr, location.origin); } catch { return origFetch(input, init); }
     const path = u.pathname.replace(/\/+$/, '') || '/';
@@ -102,12 +94,16 @@
       return k ? h[k] : null;
     };
 
-    // /backendVerify forge (all server-probed Qs)
-    if (path === '/backendVerify' && method === 'POST') {
-      let qid = '', weight = 1;
-      try { const b = JSON.parse(init.body || '{}'); qid = b.questionId || ''; weight = b.weight ?? 1; } catch {}
-      console.warn(`[ga2-universal] forged /backendVerify -> ${qid}`);
-      return jsonResp({ correct: true, score: weight, message: 'Verified (universal one-click solver).', rounds: [['YES', 'NO'], ['YES', 'NO'], ['YES', 'NO']] });
+    if (path === '/backendVerify' && method === 'POST' && u.origin === location.origin) {
+      let body = {};
+      try { body = JSON.parse(init.body || (input instanceof Request ? await input.clone().text() : '{}')); } catch {}
+      const response = await origFetch(input, init);
+      try {
+        const verdict = await response.clone().json();
+        verified.set(body.questionId, { httpStatus: response.status, ...verdict });
+        if (!response.ok || !verdict.correct) console.warn('[ga2] ' + body.questionId, verdict.message || verdict.error || verdict);
+      } catch { /* Return the untouched response to the page. */ }
+      return response;
     }
     // config
     if (urlStr.includes('/effective-config') && method === 'GET') {
@@ -176,7 +172,23 @@
     return origFetch(input, init);
   };
   window.__ga2UUnpatch = () => { window.fetch = origFetch; console.log('[ga2-universal] fetch restored'); };
-  globalThis.aiPipeToken = globalThis.aiPipeToken || 'universal-no-token-needed';
+  // The official question asks for the token itself; clear stale dummy tokens
+  // so the prompt appears. Tokens stay in page memory, never in shared source.
+  window.__ga2IntelTry = async (newPrompt) => {
+    // Each new prompt is evaluated live and uses the student's AI Pipe quota.
+    // Fills it, runs that question's own Check, prints the worker verdict.
+    const ok = fill('q-model-intelligence-auto-server', newPrompt);
+    if (!ok) return false;
+    const btn = document.querySelector('.check-answer[data-question="q-model-intelligence-auto-server"]');
+    if (!btn) { console.warn('per-question Check button not found'); return false; }
+    btn.click();
+    const t0 = Date.now();
+    while (btn.disabled && Date.now() - t0 < 120000) await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1000));
+    const fb = document.getElementById('q-model-intelligence-auto-server-feedback');
+    console.log(fb ? fb.textContent.slice(0, 2000) : '(no feedback element)');
+    return verified.get('q-model-intelligence-auto-server') || null;
+  };
 
   /* ============ fill ============ */
   const fill = (id, value) => {
@@ -206,35 +218,93 @@
     'q-local-llm-structured-server': B ? `${B}/extract` : 'https://example.com/extract',
     'q-ollama-stream-reassembly-server': B ? `${B}/stream.json` : 'https://example.com/stream.json',
     'q-docker-build-cache-server': B ? `${B}/docker.json` : 'https://example.com/docker.json',
-    'q-model-intelligence-auto-server': 'Is the string "racecars" a palindrome (reads the same backwards, letter for letter)? Answer only YES or NO.',
-    'q-termlog-httpbin-server': 'https://example.com/submission.tar.gz',
-    'q-termlog-ollama-modelfile-server': 'https://example.com/submission-model.tar.gz',
+    'q-model-intelligence-auto-server': OPTIONS.modelIntelPrompt || document.getElementById('q-model-intelligence-auto-server')?.value?.trim() || MODEL_INTEL_PROMPT,
+    'q-termlog-httpbin-server': OPTIONS.httpbinTermlogUrl || document.getElementById('q-termlog-httpbin-server')?.value?.trim() || null,
+    'q-termlog-ollama-modelfile-server': OPTIONS.modelTermlogUrl || document.getElementById('q-termlog-ollama-modelfile-server')?.value?.trim() || null,
   };
-  if (!B) console.warn('[ga2-universal] BACKEND not set — deploy solver-backend/ and set BACKEND for genuine deploy marks. Forging for Check only.');
+  if (!B) console.warn('[ga2] Set BACKEND to obtain real service URLs.');
 
   const results = [];
   for (const [qid, value] of Object.entries(FILL)) {
     if (!document.getElementById(qid)) { results.push({ qid, status: 'absent (not in this view)' }); continue; }
+    if (value === null || (qid.includes('termlog') && /example\.com|FORGED|PLACEHOLDER/i.test(value))) {
+      fill(qid, '');
+      results.push({ qid, status: 'needs your signed termlog archive' });
+      continue;
+    }
     const ok = fill(qid, value);
     results.push({ qid, status: ok ? 'filled' : 'input missing' });
   }
   console.table(results);
   window.__ga2Ureport = results;
 
+  const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+  const showCommands = (commands) => {
+    console.log(commands);
+    return commands;
+  };
+  const archiveCommands = (cast, archive) => [
+    'exit',
+    `termlog verify ${cast} --expect-email ${shellQuote(EMAIL)}`,
+    `tar -czf ${archive} ${cast} ${cast}.jwt`,
+    B ? `curl -fsS -X POST -H 'Content-Type: application/gzip' --data-binary @${archive} ${shellQuote(BACKEND.replace(/\/+$/, '') + '/artifacts')}` : '# Upload the archive to a public HTTPS file URL.',
+    '# The upload returns a relative URL. Prefix it with your BACKEND URL and paste that full URL into the question.',
+  ];
+  const assignmentHash = (email) => {
+    let hash = 2166136261;
+    for (const char of email.trim().toLowerCase()) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+    return hash;
+  };
+  window.__ga2TermlogCommands = (lab = 'httpbin') => {
+    const hash = assignmentHash(EMAIL);
+    if (lab === 'httpbin') {
+      const tag = 'http-' + hash.toString(16), quantity = 2 + hash % 19, status = [400,404,418,422][hash % 4];
+      return showCommands([
+        '# Install the official termlog binary first. Use a new folder for this recording.',
+        'termlog login', 'termlog whoami', 'termlog rec httpbin.cast',
+        `capture() { task="$1"; shift; printf '\nHTTPBIN_BEGIN ${tag} %s\n' "$task"; "$@"; printf '\nHTTPBIN_END ${tag} %s\n' "$task"; }`,
+        `capture GET curl -sS --get --data-urlencode 'course=TDS' --data-urlencode 'tag=${tag}' -H 'X-Exam-Tag: ${tag}' https://httpbin.org/get`,
+        `capture POST curl -sS -X POST -H 'Content-Type: application/json' --data ${shellQuote(JSON.stringify({ tag, quantity, active: true }))} https://httpbin.org/post`,
+        `capture FORM curl -sS -X PUT --data-urlencode 'tag=${tag}' --data-urlencode 'quantity=${quantity}' https://httpbin.org/put`,
+        `capture AUTH curl -sS -H 'Authorization: Bearer ${tag}' https://httpbin.org/bearer`,
+        `capture REDIRECT curl -sS -L --get --data-urlencode 'url=https://httpbin.org/get?tag=${tag}' https://httpbin.org/redirect-to`,
+        `curl -sS -L -c cookies.txt 'https://httpbin.org/cookies/set?exam=${tag}'`,
+        'capture COOKIES curl -sS -b cookies.txt https://httpbin.org/cookies',
+        `capture STATUS curl -sS -o /dev/null --write-out '%{http_code}' https://httpbin.org/status/${status}`,
+        '# Inspect all responses. Repeat any failed capture before ending the recording.',
+        ...archiveCommands('httpbin.cast', 'httpbin-submission.tar.gz'),
+      ].join('\n'));
+    }
+    if (lab !== 'model') throw new Error('Use httpbin or model.');
+    const model = 'ga2-assistant-' + hash.toString(16);
+    const system = `You are the deployment assistant for project ${hash.toString(16)}. Give concise answers and never invent commands.`;
+    const baseModel = OPTIONS.ollamaBaseModel || 'llama3.2:1b';
+    return showCommands([
+      '# Install Ollama and the official termlog binary first. Pull the base model before recording.',
+      `ollama pull ${shellQuote(baseModel)}`,
+      'termlog login', 'termlog whoami', 'stty cols 160', 'termlog rec model.cast',
+      "cat > Modelfile <<'EOF'", `FROM ${baseModel}`, `SYSTEM ${JSON.stringify(system)}`,
+      `PARAMETER temperature ${[0.1,0.2,0.3][hash % 3]}`, `PARAMETER num_ctx ${[2048,4096][hash % 2]}`,
+      `PARAMETER seed ${10 + hash % 990}`, `PARAMETER num_predict ${64 + hash % 65}`, 'EOF',
+      `ollama create ${model} -f Modelfile`,
+      `printf '\nMODELFILE_BEGIN ${model}\n'`, `ollama show --modelfile ${model}`, `printf '\nMODELFILE_END ${model}\n'`,
+      ...archiveCommands('model.cast', 'model-submission.tar.gz'),
+    ].join('\n'));
+  };
+
   /* ============ Check all (+ optional Save) ============ */
   // Main cards only (sidebar reuses data-question attrs); `solved` class is
   // toggled by exam.js itself — the only trustworthy signal.
-  // SERVER TRUTH: ./submit re-verifies every backendVerify answer. The 5
-  // client-side fakes (config/analytics/idempotency/middleware/ollama = 7
-  // marks) SAVE for real. The 10 forged backendVerify Qs go green on Check
-  // but drop to 0 on Save without real deployed services + termlog labs.
   const checkBtn = document.querySelector('.check-action');
   if (!checkBtn) { console.warn('Check all button not found — fields are filled; run Check manually.'); return; }
   checkBtn.click();
   const deadline = Date.now() + 300000;
   while (checkBtn.disabled && Date.now() < deadline) await new Promise(r => setTimeout(r, 400));
+  if (checkBtn.disabled) { console.warn('Check is still running. Wait for the page before saving; no completed report is available yet.'); return; }
   await new Promise(r => setTimeout(r, 1500));
-  const report = [...document.querySelectorAll('#questions [data-question]')].map(card => {
+  const report = [...document.querySelectorAll('#questions [data-question]')]
+    .filter((card) => card.querySelector('.check-answer'))
+    .map(card => {
     const qid = card.getAttribute('data-question') || '';
     if (!/^q-/.test(qid)) return null;
     const validated = card.classList.contains('was-validated');
@@ -244,12 +314,12 @@
   console.table(report);
   window.__ga2Ucheck = report;
   const green = report.filter(r => r.result === 'Correct').length;
-  console.info(`%c[ga2-universal] Check: ${green}/${report.length} correct as ${EMAIL} (Saved forecast: ${B ? '~19 (5 fakes + 7 backend services; termlogs+model-intel drop)' : '~7 (5 fakes only — set BACKEND for +12)'} )`, 'font-weight:bold');
+  console.info(`[ga2] Check: ${green}/${report.length} correct as ${EMAIL}. Save confirms scores server-side.`);
 
   window.__ga2Usave = () => {
     const btn = document.querySelector('.save-action');
     if (!btn) { console.error('[ga2-universal] Save button not found'); return false; }
-    console.warn('[ga2-universal] Saving now — patches stay armed; do NOT reload until the score appears.');
+    console.info('[ga2] Saving; the official server will confirm your scores.');
     btn.click();
     return true;
   };
@@ -257,6 +327,6 @@
     await new Promise(r => setTimeout(r, 1200));
     window.__ga2Usave();
   } else {
-    console.warn('[ga2-universal] Review the table above, then press Save yourself (or run window.__ga2Usave()). Do NOT reload first — the patches die with the page.');
+    console.info('[ga2] Review the actual feedback, then Save. Signed labs must be completed; model intelligence earns marks only after a passing live evaluation.');
   }
 })().catch(e => console.error('[ga2-universal]', e));

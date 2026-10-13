@@ -6,7 +6,7 @@
   "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node test.mjs"
+    "test": "node --test test.mjs browser.test.mjs"
   },
   "dependencies": {
     "seedrandom": "3.0.5"

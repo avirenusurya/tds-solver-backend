@@ -30,10 +30,17 @@
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import seedrandom from 'seedrandom';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { buildLedgerStore, ledgerAnswerOne } from './ledger.mjs';
+import { extractInvoice } from './invoice.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 const EXAM_ORIGIN = 'https://exam.sanand.workers.dev';
+const DATA_DIR = resolve(process.env.DATA_DIR || './data');
+const REVISION = '2026-10-13-real-validation-v1';
 
 /* ================= per-email seeds (exact chunk ports) ================= */
 const seedFor = (qid, email, ver = '') => seedrandom(`${qid}#${(email || '').trim().toLowerCase()}#${ver}`);
@@ -175,7 +182,7 @@ const sendJson = (res, code, obj, extra = {}) => {
   res.writeHead(code, { 'Content-Type': 'application/json', ...extra });
   res.end(JSON.stringify(obj));
 };
-const readBody = (req, limit = 5 * 1024 * 1024) => new Promise((resolve, reject) => {
+const readBuffer = (req, limit = 5 * 1024 * 1024) => new Promise((resolve, reject) => {
   let n = 0;
   const parts = [];
   req.on('data', (c) => {
@@ -183,9 +190,10 @@ const readBody = (req, limit = 5 * 1024 * 1024) => new Promise((resolve, reject)
     if (n > limit) { reject(new Error('body too large')); req.destroy(); return; }
     parts.push(c);
   });
-  req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
+  req.on('end', () => resolve(Buffer.concat(parts)));
   req.on('error', reject);
 });
+const readBody = async (req, limit) => (await readBuffer(req, limit)).toString('utf8');
 const b64urlToBuf = (s) => Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 
 const OAUTH_PUBKEY = `-----BEGIN PUBLIC KEY-----
@@ -198,104 +206,26 @@ SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
 dQIDAQAB
 -----END PUBLIC KEY-----`;
 
-/* ================= ledger QA (port of deploy/ledger-agent.mjs) ================= */
-const MONTHS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
-const STOP = new Set([
-  ...Object.keys(MONTHS), 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
-  'region', 'regions', 'zone', 'area', 'territory', 'location', 'month', 'months', 'year', 'years', 'date',
-  'product', 'products', 'item', 'items', 'customer', 'customers', 'client', 'buyer', 'account',
-  'order', 'orders', 'total', 'totals', 'revenue', 'usd', 'dollars', 'dollar', 'worth', 'value', 'sum',
-  'what', 'which', 'how', 'many', 'much', 'the', 'a', 'an', 'in', 'on', 'from', 'for', 'by', 'of', 'to', 'and',
-  'was', 'were', 'is', 'are', 'did', 'do', 'does', 'placed', 'make', 'made', 'during', 'across', 'overall',
-  'between', 'all', 'each', 'their', 'this', 'that', 'with', 'into', 'at', 'per', 'q1', 'q2', 'q3', 'q4',
-  'refund', 'refunds', 'returned', 'quantity', 'quantities', 'units', 'amount', 'amounts', 'sales',
-]);
-function findRecords(node, depth = 0) {
-  if (depth > 4) return null;
-  if (Array.isArray(node) && node.length && typeof node[0] === 'object' && node[0] !== null) return node;
-  if (node && typeof node === 'object') {
-    const keys = Object.keys(node);
-    const pref = keys.filter((k) => /order|ledger|record|transaction|entry|data|items/i.test(k));
-    for (const k of [...pref, ...keys]) {
-      const hit = findRecords(node[k], depth + 1);
-      if (hit) return hit;
-    }
+/* ================= ledger storage ================= */
+const ledgerFile = (email) => join(DATA_DIR, crypto.createHash('sha256').update(email).digest('hex') + '.json');
+async function persistLedger(email, raw, store) {
+  await mkdir(DATA_DIR, { recursive: true });
+  const file = ledgerFile(email);
+  const temp = file + '.' + crypto.randomUUID() + '.tmp';
+  await writeFile(temp, JSON.stringify(raw), { mode: 0o600 });
+  await rename(temp, file);
+  ledgers.set(email, store);
+}
+async function loadLedger(email) {
+  if (ledgers.has(email)) return ledgers.get(email);
+  try {
+    const store = buildLedgerStore(JSON.parse(await readFile(ledgerFile(email), 'utf8')));
+    ledgers.set(email, store);
+    return store;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
   }
-  return null;
-}
-function buildLedgerStore(raw) {
-  const records = findRecords(raw);
-  if (!records) return null;
-  const fields = Object.keys(records[0]);
-  const pick = (...res) => {
-    for (const re of res) {
-      const f = fields.find((k) => re.test(k.toLowerCase()));
-      if (f) return f;
-    }
-    return null;
-  };
-  const F = {
-    date: pick(/^date$/, /_date$/, /created/, /timestamp/, /when/),
-    region: pick(/region/, /zone/, /area/, /territory/, /location/),
-    product: pick(/product/, /^item/, /sku/, /^name$/, /title/),
-    amount: pick(/amount/, /total/, /revenue/, /^price/, /value/),
-    refundAmount: pick(/refund.*(amount|total|value)/, /refund$/),
-    refunded: pick(/^refunded$/, /is_refund/, /refund_flag/, /returned/),
-    qty: pick(/^qty$/, /quantity/, /units/),
-    customer: pick(/customer/, /client/, /buyer/, /account/, /^user$/),
-    status: pick(/^status$/, /^state$/),
-  };
-  return { records, F };
-}
-function ledgerAnswerOne(store, question) {
-  const { records, F } = store;
-  const s = String(question).toLowerCase();
-  const q = { tokens: [], metric: 'revenue', month: null, year: null };
-  if (/refund/.test(s)) q.metric = 'refunds';
-  if (/\bcount\b|\bnumber of\b|\bhow many\b|\borders\b/.test(s) && !/revenue|total usd|worth/.test(s)) q.metric = 'count';
-  if (/\bunits\b|\bquantity\b|\bquantities\b/.test(s)) q.metric = 'units';
-  const m = s.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/);
-  if (m) q.month = MONTHS[m[1]];
-  const ym = s.match(/\b(20\d{2})-(\d{2})\b/);
-  if (ym) { q.year = +ym[1]; q.month = +ym[2]; }
-  const y = s.match(/\b(20\d{2})\b/);
-  if (y) q.year = +y[1];
-  const words = s.match(/[a-z][a-z0-9_-]+/g) || [];
-  q.tokens = [...new Set(words.filter((w) => w.length >= 3 && !STOP.has(w) && !/^\d/.test(w) && !MONTHS[w]))];
-  const monthOf = (rec) => {
-    const v = F.date ? String(rec[F.date] ?? '') : '';
-    let mm = v.match(/^(20\d{2})-(\d{2})/);
-    if (mm) return { year: +mm[1], month: +mm[2] };
-    mm = v.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i);
-    if (mm) {
-      const idx = Object.keys(MONTHS).findIndex((k) => k.startsWith(mm[1].toLowerCase()));
-      return { month: idx + 1, year: +(v.match(/20\d{2}/) || [0])[0] };
-    }
-    mm = v.match(/\b(\d{1,2})\/(\d{1,2})\/(20\d{2})\b/);
-    if (mm) return { year: +mm[3], month: +mm[2] };
-    return { month: null, year: null };
-  };
-  const rows = records.filter((rec) => {
-    if (q.month || q.year) {
-      const dd = monthOf(rec);
-      if (q.month && dd.month !== q.month) return false;
-      if (q.year && dd.year && dd.year !== q.year) return false;
-      if (q.year && !dd.year) return false;
-    }
-    const blob = Object.values(rec).map((v) => (typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''))).join(' ').toLowerCase();
-    for (const t of q.tokens) if (!blob.includes(t)) return false;
-    return true;
-  });
-  let value;
-  if (q.metric === 'count') value = rows.length;
-  else if (q.metric === 'units') value = rows.reduce((a, r) => a + (Number(F.qty ? r[F.qty] : NaN) || 0), 0);
-  else if (q.metric === 'refunds') {
-    if (F.refundAmount) value = rows.reduce((a, r) => a + (Number(r[F.refundAmount]) || 0), 0);
-    else if (F.refunded) value = rows.filter((r) => /true|yes|1|refund/i.test(String(r[F.refunded]))).reduce((a, r) => a + (Number(F.amount ? r[F.amount] : NaN) || 0), 0);
-    else value = rows.reduce((a, r) => a + (Number(F.amount ? r[F.amount] : NaN) || 0), 0);
-  } else value = rows.reduce((a, r) => a + (Number(F.amount ? r[F.amount] : NaN) || 0), 0);
-  if (typeof value === 'number' && q.metric !== 'count') value = Math.round(value * 100) / 100;
-  return value;
 }
 
 /* ================= MCP (port of deploy/mcp-server.mjs, email from path) ================= */
@@ -340,21 +270,6 @@ function mcpHandleOne(msg, headers, email, reply) {
   }
 }
 
-/* ================= invoice extractor (no seeds; regex over fixed format) ================= */
-function extractInvoice(text) {
-  const t = String(text ?? '');
-  const vm = /invoice from\s+(.+?)\./i.exec(t);
-  const am = /total due:\s*([\d,]+(?:\.\d+)?)\s*([A-Za-z]{3})/i.exec(t);
-  const dm = /(\d{4}-\d{2}-\d{2})/.exec(t);
-  if (!vm || !am || !dm) return null;
-  return {
-    vendor: vm[1].trim(),
-    amount: parseFloat(am[1].replace(/,/g, '')),
-    currency: am[2].toUpperCase(),
-    date: dm[1],
-  };
-}
-
 /* ================= router ================= */
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url || '/', 'http://local');
@@ -384,7 +299,44 @@ const server = http.createServer(async (req, res) => {
       }, acaostar);
     }
     if (path === '/health' && method === 'GET') {
-      return sendJson(res, 200, { ok: true, time: Date.now() }, acaostar);
+      return sendJson(res, 200, { ok: true, time: Date.now(), revision: REVISION, features: ['ledger-export-rates', 'invoice-vendor-punctuation', 'signed-archive-hosting'] }, acaostar);
+    }
+
+    // Host genuine termlog archives without changing their signed bytes.
+    if (path === '/artifacts' && method === 'OPTIONS') {
+      res.writeHead(204, { ...acaostar, 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': allowHeaders });
+      return res.end();
+    }
+    if (path === '/artifacts' && method === 'POST') {
+      const archive = await readBuffer(req, 1024 * 1024);
+      try {
+        const tar = gunzipSync(archive, { maxOutputLength: 5 * 1024 * 1024 });
+        const names = new Set();
+        for (let offset = 0; offset + 512 <= tar.length;) {
+          const header = tar.subarray(offset, offset + 512);
+          if (header.every((byte) => byte === 0)) break;
+          const name = header.subarray(0, 100).toString('utf8').split('\0')[0];
+          const size = parseInt(header.subarray(124, 136).toString('ascii').replace(/\0/g, '').trim() || '0', 8);
+          if (!Number.isFinite(size) || size < 0 || offset + 512 + size > tar.length) throw new Error('Invalid tar entry');
+          names.add(name);
+          offset += 512 + Math.ceil(size / 512) * 512;
+        }
+        if (![...names].some((name) => name.endsWith('.cast') && names.has(name + '.jwt'))) throw new Error('Archive must contain a .cast and its .cast.jwt receipt');
+      } catch (error) { return sendJson(res, 422, { error: error.message }, acaostar); }
+      const name = crypto.randomUUID() + '.tar.gz';
+      await mkdir(join(DATA_DIR, 'artifacts'), { recursive: true });
+      await writeFile(join(DATA_DIR, 'artifacts', name), archive, { mode: 0o600 });
+      return sendJson(res, 201, { url: '/artifacts/' + name, message: 'Hosted unchanged. The exam server verifies the recording and receipt.' }, acaostar);
+    }
+    if (/^\/artifacts\/[0-9a-f-]{36}\.tar\.gz$/.test(path) && method === 'GET') {
+      try {
+        const archive = await readFile(join(DATA_DIR, 'artifacts', segs[1]));
+        res.writeHead(200, { ...acaostar, 'Content-Type': 'application/gzip', 'Content-Length': archive.length });
+        return res.end(archive);
+      } catch (error) {
+        if (error.code === 'ENOENT') return sendJson(res, 404, { error: 'Archive not found; upload it again after a redeploy.' }, acaostar);
+        throw error;
+      }
     }
 
     /* ---- MCP: POST /mcp/<email> (grader POSTs JSON-RPC here directly) ---- */
@@ -436,10 +388,11 @@ const server = http.createServer(async (req, res) => {
       catch { return sendJson(res, 400, { error: 'bad json' }, acaostar); }
       let doc = payload && typeof payload === 'object' && 'ledger' in payload ? payload.ledger : payload;
       if (typeof doc === 'string') { try { doc = JSON.parse(doc); } catch { /* keep string -> 422 below */ } }
-      const store = buildLedgerStore(doc);
-      if (!store) return sendJson(res, 422, { error: 'no record array found', topKeys: doc && typeof doc === 'object' ? Object.keys(doc).slice(0, 20) : [] }, acaostar);
-      ledgers.set(email, store);
-      return sendJson(res, 200, { ok: true, email, records: store.records.length, answerUrl: `/answer/${encodeURIComponent(email)}` }, acaostar);
+      let store;
+      try { store = buildLedgerStore(doc); }
+      catch (error) { return sendJson(res, 422, { error: error.message }, acaostar); }
+      await persistLedger(email, doc, store);
+      return sendJson(res, 200, { ok: true, email, records: store.records.length, sourceRows: store.sourceRows, currencies: Object.keys(store.rates), answerUrl: `/answer/${encodeURIComponent(email)}` }, acaostar);
     }
 
     /* ---- ledger QA: POST /answer/<email> (3 payload shapes, port of ledger-agent) ---- */
@@ -450,7 +403,7 @@ const server = http.createServer(async (req, res) => {
         return res.end();
       }
       if (method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, acaostar);
-      const store = ledgers.get(email);
+      const store = await loadLedger(email);
       if (!store) return sendJson(res, 404, { error: 'no ledger uploaded for this email; POST it to /ledger/<email> first' }, acaostar);
       const raw = await readBody(req);
       let payload;
@@ -512,6 +465,18 @@ const server = http.createServer(async (req, res) => {
         if (base['Access-Control-Allow-Origin']) base['Access-Control-Expose-Headers'] = expose;
         return base;
       };
+
+      if (sub === '/effective-config' && method === 'GET') {
+        const effective = configBase(email, q.get('version') || '');
+        for (const entry of q.getAll('set')) {
+          const equals = entry.indexOf('=');
+          if (equals < 0) continue;
+          const key = entry.slice(0, equals);
+          if (CF_M.includes(key)) effective[key] = cfQ(key, entry.slice(equals + 1));
+        }
+        effective.api_key = '****';
+        return sendJson(res, 200, effective, withCors());
+      }
 
       /* GET /stats?values= (fastapi metrics) */
       if (sub === '/stats' && method === 'GET') {
@@ -704,4 +669,4 @@ const server = http.createServer(async (req, res) => {
   function obsRid() { return { 'X-Request-ID': crypto.randomUUID() }; }
 });
 
-server.listen(PORT, () => console.error(`tds-solver-backend on :${PORT}`));
+server.listen(PORT, () => console.error(`tds-solver-backend on :${server.address().port} (${REVISION})`));

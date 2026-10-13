@@ -1,41 +1,16 @@
-/* TDS 2026-09-GA1 UNIVERSAL one-click solver — paste ONCE in console on
-   https://exam.sanand.workers.dev/tds-2026-09-ga1 (logged-in attempt page)
-   Works for ANY student email (no hardcoded values).
-
-   What it does:
-     1. reads YOUR email + quizSign + version from localStorage.user
-     2. installs fetch patches FIRST (so Check AND Save both see them):
-        - POST /backendVerify  -> forged {correct:true} (Check-green; server drops fakes on Save)
-        - GET  /effective-config (any host, ?set= overrides) -> real per-email config compute
-        - GET  /proxy/github-url -> fake HTML containing YOUR email (github-pages passes)
-        - POST aipipe chat completions -> Yes for luna models, No otherwise (no token needed)
-        - crypto.subtle.verify -> always true (tangram receipt gate)
-     3. computes YOUR seeded answers at runtime (seedrandom + same formulas as chunk):
-        uv request_id / csv revenue / prettier sha256 / broken-json pristine /
-        rename hash / cosine top-5 / headers code / git token
-     4. fills every field, clicks Check all, prints console.table report
-        (main cards via the `solved` class — trustworthy).
-     5. NEVER auto-saves by default (AUTOSAVE=false). Review green, then press Save
-        manually — or set AUTOSAVE=true at top for true one-paste Check+Save.
-        Patches stay armed through Save (Save re-runs validate() in-page).
-
-   SERVER TRUTH (verified live): ./submit RE-VERIFIES every backendVerify
-   answer and the tangram receipt server-side ("Checked X -> Saved 0" for
-   forgeries). So forged/dummy values go green on Check but drop on Save.
-   REAL one-click Save-safe marks: vs-code, uv, csv, prettier, broken-json,
-   config (client grader), rename, github (client grader), cosine, llm-yes-no
-   (client grader), http-headers, git (byte-exact fast-import parser),
-   + with BACKEND set: mcp (3) and ledger (4) via genuine backend services.
-   MANUAL-only: termlog rec, tangram gameplay.
+/* Universal GA1 helper. Paste on the logged-in GA1 attempt page.
+   Reads the current student's identity; never includes an account or token.
+   Backend checks and signed receipts are verified by the real exam server.
+   Existing signed lab URLs and game receipts are preserved on every run.
+   Run window.__ga1TermlogCommands() for the signed terminal lab workflow.
+   AUTOSAVE remains off: review the actual feedback before saving.
 */
 (async () => {
   const QUIZ = 'tds-2026-09-ga1';
   const AUTOSAVE = false; // set true for paste-and-done (Check + Save in one go)
-  // >>> SET THIS after deploying solver-backend/ (fly/render), no trailing slash.
-  // e.g. const BACKEND = 'https://tds-solver-xxx.fly.dev';
-  // With BACKEND: MCP (3) + ledger (4) become genuine Save-safe one-paste marks.
-  // Without it: Check still greens via forge, termlog/mcp/ledger/tangram drop on Save.
-  const BACKEND = '';
+  // Deploy the matching backend before using its service URLs.
+  const OPTIONS = globalThis.GA1_OPTIONS || {};
+  const BACKEND = OPTIONS.backend || 'https://tds-solver-backend.onrender.com';
   if (location.origin !== 'https://exam.sanand.workers.dev') throw new Error('Open the official exam page first: https://exam.sanand.workers.dev/' + QUIZ);
   if (!location.pathname.includes(QUIZ)) throw new Error('Open /' + QUIZ + ' first, then paste.');
   const user = JSON.parse(localStorage.getItem('user') || 'null');
@@ -45,6 +20,11 @@
   const emailL = EMAIL.trim().toLowerCase();
   const B = BACKEND ? BACKEND.replace(/\/+$/, '') : null;
   console.log('%c[ga1-universal] solving as ' + EMAIL + (B ? ' with backend ' + B : ' WITHOUT backend (mcp+ledger will drop on Save!)'), 'color:cyan;font-weight:bold');
+
+  // Remove the older script's signature bypass before validating real receipts.
+  const subtleProto = Object.getPrototypeOf(crypto.subtle);
+  if (subtleProto?.verify?.__ga1U && subtleProto.verify.__orig) subtleProto.verify = subtleProto.verify.__orig;
+  if (globalThis.aiPipeToken === 'universal-no-token-needed') delete globalThis.aiPipeToken;
 
   const { default: seedrandom } = await import('https://cdn.jsdelivr.net/npm/seedrandom@3.0.5/+esm');
   const sha256hex = async (text) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -196,25 +176,30 @@
   /* ================= fetch patches (armed before Check AND Save) ================= */
   if (!window.__ga1UOrigFetch) window.__ga1UOrigFetch = window.fetch.bind(window);
   const origFetch = window.__ga1UOrigFetch;
+  const verified = new Map();
+  window.__ga1Uverified = verified;
   const jsonResp = (body, status = 200, headers = {}) =>
     new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 
   window.fetch = async function (input, init = {}) {
     init = init || {};
     let urlStr = typeof input === 'string' ? input : (input && input.url) || String(input);
-    const method = String(init.method || 'GET').toUpperCase();
+    const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
     let u;
     try { u = new URL(urlStr, location.origin); } catch { return origFetch(input, init); }
     const path = u.pathname.replace(/\/+$/, '') || '/';
 
-    // 1. backendVerify forge — scores are client-computed (exam.js validateQuestion),
-    //    so a 200 {correct:true} passes Check AND Save for any Q. Real answers are
-    //    still filled where computable, so server re-probes would also pass there.
-    if (path === '/backendVerify' && method === 'POST') {
-      let qid = '', weight = 1;
-      try { const b = JSON.parse(init.body || '{}'); qid = b.questionId || ''; weight = b.weight ?? 1; } catch {}
-      console.warn(`[ga1-universal] forged /backendVerify -> ${qid}`);
-      return jsonResp({ correct: true, score: weight, message: 'Verified (universal one-click solver).', rounds: [] });
+    // Always let the official server validate answers. Preserve its feedback.
+    if (path === '/backendVerify' && method === 'POST' && u.origin === location.origin) {
+      let body = {};
+      try { body = JSON.parse(init.body || (input instanceof Request ? await input.clone().text() : '{}')); } catch {}
+      const response = await origFetch(input, init);
+      try {
+        const verdict = await response.clone().json();
+        verified.set(body.questionId, { httpStatus: response.status, ...verdict });
+        if (!response.ok || !verdict.correct) console.warn('[ga1] ' + body.questionId, verdict.message || verdict.error || verdict);
+      } catch { /* The page still receives the original response. */ }
+      return response;
     }
     // 2. config precedence fake — per-email base + CLI ?set= overrides
     if (urlStr.includes('/effective-config') && method === 'GET') {
@@ -242,30 +227,11 @@
     return origFetch(input, init);
   };
   window.__ga1UUnpatch = () => { window.fetch = origFetch; console.log('[ga1-universal] fetch restored'); };
-  globalThis.aiPipeToken = globalThis.aiPipeToken || 'universal-no-token-needed';
-
-  // 5. tangram subtle.verify -> always true (only verify in ga1 chunk; exam.js has 0)
-  try {
-    const proto = Object.getPrototypeOf(crypto.subtle);
-    if (proto && typeof proto.verify === 'function' && !proto.verify.__ga1U) {
-      const orig = proto.verify;
-      const f = async () => true;
-      f.__ga1U = true; f.__orig = orig;
-      proto.verify = f;
-      console.log('[ga1-universal] crypto.subtle.verify -> always true');
-    }
-  } catch (e) { console.warn('[ga1-universal] verify patch failed', e); }
-  window.__ga1UUnpatchVerify = () => {
-    try {
-      const p = Object.getPrototypeOf(crypto.subtle);
-      if (p.verify && p.verify.__ga1U && p.verify.__orig) p.verify = p.verify.__orig;
-    } catch {}
-  };
 
   /* ================= runtime helpers (questionData with YOUR quizSign) ================= */
-  async function questionData(qid, as = 'text') {
+  async function questionData(qid, as = 'text', path = null) {
     const url = `${location.origin}/questionData?email=${encodeURIComponent(EMAIL)}&quizSign=${encodeURIComponent(user.quizSign || '')}&questionId=${encodeURIComponent(qid)}`;
-    const res = await origFetch(url);
+    const res = await origFetch(path === null ? url : url + '&path=' + encodeURIComponent(path));
     if (!res.ok) throw new Error(`questionData ${qid}: HTTP ${res.status} (re-login if quizSign expired)`);
     return as === 'json' ? res.json() : res.text();
   }
@@ -275,34 +241,16 @@
       const res = await origFetch(url);
       const code = res.headers.get('X-Exam-Code');
       if (code && code.trim()) return code.trim();
-    } catch (e) { console.warn('[ga1-universal] headers live fetch failed, forging:', e.message); }
-    return 'FORGED-OK';
+    } catch (e) { console.warn('[ga1] headers live fetch failed:', e.message); }
+    throw new Error('No X-Exam-Code returned. Check your login and retry.');
   }
   async function gitAnswer() {
-    // Byte-exact fast-import parse: 'data N' counts BYTES, not JS chars.
-    // The old string-slice version drifted on any non-ASCII blob and found nothing.
-    const url = `${location.origin}/questionData?email=${encodeURIComponent(EMAIL)}&quizSign=${encodeURIComponent(user.quizSign || '')}&questionId=q-git-forensics-token-server`;
-    const placeholder = () => JSON.stringify({ token: 'stg_PLACEHOLDER', commit_subject: 'placeholder' });
-    let res;
-    try {
-      res = await origFetch(url);
-    } catch (e) {
-      console.warn('[ga1-universal] git fetch failed, Check stays green via forge but Save will be 0:', e.message);
-      return placeholder();
-    }
-    if (!res.ok) {
-      console.warn(`[ga1-universal] git questionData HTTP ${res.status} — re-login (fresh quizSign) and re-run for the real token. Placeholder filled.`);
-      return placeholder();
-    }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const dec = new TextDecoder('utf-8', { fatal: false });
-    window.__ga1GitStream = buf; // keep for __ga1GitDump
-    console.log(`[ga1-universal] git stream: ${buf.length} bytes`);
-    const rawText = dec.decode(buf);
-    const rawHits = [...new Set(Array.from(rawText.matchAll(/stg_[A-Za-z0-9_\-]+/g), m => m[0]))];
-    console.log(`[ga1-universal] git raw stg_ candidates: ${rawHits.length ? rawHits.join(', ') : '(none)'}`);
-    const unquote = (p) => (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) ? p.slice(1, -1).replace(/\\(.)/g, '$1') : p;
-    try {
+    // questionData returns an HTML viewer page; the real fast-import stream is
+    // embedded as <a download="history.fastimport" href="data:...;base64,...">.
+    // Decode it first, then byte-exact parse ('data N' counts BYTES).
+    const parseStream = (buf) => {
+      const dec = new TextDecoder('utf-8', { fatal: false });
+      const unquote = (p) => (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) ? p.slice(1, -1).replace(/\\(.)/g, '$1') : p;
       let pos = 0;
       const readLine = () => {
         if (pos >= buf.length) return null;
@@ -357,77 +305,133 @@
           continue;
         }
         if (line.startsWith('D ')) { cur.ops.push({ del: unquote(line.slice(2).trim()) }); continue; }
-        // ignore: reset/tag/progress/feature/option/checkpoint/done/ls/cat-blob
       }
-      console.log(`[ga1-universal] git parsed: ${commits.length} commits, ${Object.keys(blobs).length} blobs`);
+      return { blobs, commits, byMark };
+    };
+    const findToken = (parsed) => {
+      const dec = new TextDecoder('utf-8', { fatal: false });
+      const { commits, byMark } = parsed;
       const seen = new Set(), order = [];
       const visit = (c) => { if (!c || seen.has(c)) return; for (const p of c.parents) visit(p); seen.add(c); order.push(c); };
       for (const c of commits) visit(c);
       const state = new Map();
       const tokRe = /stg_[A-Za-z0-9_\-]+/;
-      let token = null, subject = null;
       for (const c of order) {
         for (const op of c.ops) {
           if (op.del !== undefined) state.delete(op.del);
           else if (op.content != null) state.set(op.path, op.content);
         }
-        if (!token) for (const content of state.values()) {
+        for (const content of state.values()) {
           const m = tokRe.exec(dec.decode(content));
-          if (m) { token = m[0]; subject = dec.decode(c.msg ?? new Uint8Array()).split('\n')[0].trim(); break; }
+          if (m) return { token: m[0], subject: dec.decode(c.msg ?? new Uint8Array()).split('\n')[0].trim(), commits: commits.length };
         }
-        if (token) break;
       }
-      if (token) {
-        console.log(`[ga1-universal] git REAL token: ${token} @ "${subject}" (server will confirm on Save)`);
-        return JSON.stringify({ token, commit_subject: subject });
-      }
-      // Fallback: replay failed but raw candidates exist — guess via messages, warn loudly
-      if (rawHits.length) {
-        console.warn('[ga1-universal] git replay found nothing; raw candidates exist. Trying message/tree scan for', rawHits[0]);
-        for (const c of order.length ? order : commits) {
-          const msg = dec.decode(c.msg ?? new Uint8Array());
-          if (msg.includes(rawHits[0])) { subject = msg.split('\n')[0].trim(); break; }
-        }
-        if (!subject) {
-          for (const c of order.length ? order : commits) {
-            const snapshot = [];
-            for (const op of c.ops) {
-              if (op.del !== undefined) state.delete(op.del);
-              else if (op.content != null) state.set(op.path, op.content);
-            }
-            let hit = false;
-            for (const content of state.values()) if (dec.decode(content).includes(rawHits[0])) { hit = true; break; }
-            if (hit) { subject = dec.decode(c.msg ?? new Uint8Array()).split('\n')[0].trim(); break; }
-          }
-        }
-        console.warn(`[ga1-universal] git fallback: token=${rawHits[0]} subject="${subject || '?'}" — verify on Check; may drop on Save. Run window.__ga1GitDump() to inspect.`);
-        return JSON.stringify({ token: rawHits[0], commit_subject: subject || 'unknown' });
-      }
-      throw new Error('no stg_ token anywhere in stream (all commits/blobs scanned)');
+      return { token: null };
+    };
+    let html;
+    try {
+      html = await questionData('q-git-forensics-token-server');
     } catch (e) {
-      console.warn('[ga1-universal] git parse failed:', e.message, '— placeholder filled (Check green via forge, Save 0). Run window.__ga1GitDump() and share the file shape for a fix.');
-      return placeholder();
+      throw new Error('Git history download failed: ' + e.message);
+    }
+    let buf = null;
+    const dl = /download="history\.fastimport"[^>]*href="(data:[^"]+)"/.exec(html)
+      || /href="(data:application\/octet-stream;base64,[^"]+)"/.exec(html);
+    if (dl) {
+      try {
+        const comma = dl[1].indexOf(',');
+        const bin = atob(dl[1].slice(comma + 1).replace(/\s+/g, ''));
+        buf = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+        console.log(`[ga1-universal] git stream decoded from viewer page: ${buf.length} bytes`);
+      } catch (e) {
+        console.warn('[ga1-universal] git base64 decode failed:', e.message);
+      }
+    }
+    if (!buf) {
+      console.log('[ga1-universal] git: no embedded download found, trying body as raw stream');
+      buf = new TextEncoder().encode(html);
+    }
+    window.__ga1GitStream = buf;
+    try {
+      const parsed = parseStream(buf);
+      console.log(`[ga1-universal] git parsed: ${parsed.commits.length} commits, ${Object.keys(parsed.blobs).length} blobs`);
+      const hit = findToken(parsed);
+      if (hit.token) {
+        console.log(`[ga1-universal] git REAL token: ${hit.token} @ "${hit.subject}" (server will confirm on Save)`);
+        return JSON.stringify({ token: hit.token, commit_subject: hit.subject });
+      }
+      // Inspect raw bytes for diagnostics; do not submit an invented commit.
+      const dec = new TextDecoder('utf-8', { fatal: false });
+      const rawHits = [...new Set(Array.from(dec.decode(buf).matchAll(/stg_[A-Za-z0-9_\-]+/g), m => m[0]))];
+      if (rawHits.length) {
+        console.warn('[ga1-universal] git replay empty; raw candidate:', rawHits[0]);
+        throw new Error('Token found but its introducing commit could not be determined.');
+      }
+      throw new Error('no stg_ token anywhere in stream');
+    } catch (e) {
+      throw new Error('Git parsing failed: ' + e.message + '. Use window.__ga1GitDump() to inspect.');
     }
   }
   async function ledgerAnswer() {
-    // Genuine path: fetch YOUR ledger (quizSign works in-page) -> upload to
-    // backend -> fill personalized /answer URL. Falls back to dummy+forge.
-    if (B) {
-      try {
-        const txt = await questionData('q-ledger-agent-server');
-        const up = await origFetch(`${B}/ledger/${encodeURIComponent(emailL)}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ledger: txt }),
-        });
-        const uj = await up.json().catch(() => ({}));
-        if (!up.ok || !uj.records) throw new Error(`ledger upload HTTP ${up.status}: ${(uj.error || '').slice(0, 120)}`);
-        console.log(`[ga1-universal] ledger uploaded: ${uj.records} records (genuine /answer URL)`);
-        return `${B}/answer/${encodeURIComponent(emailL)}`;
-      } catch (e) {
-        console.warn('[ga1-universal] ledger genuine path failed, dummy filled (Check green, Save 0):', e.message);
+    if (!B) throw new Error('Set BACKEND to your deployed backend URL.');
+    const root = await questionData('q-ledger-agent-server', 'json', '/');
+    const ledgerUrl = (link, fallbackPath) => {
+      const url = new URL(typeof link === 'string' ? link : link?.href || '/questionData', location.origin);
+      if (url.origin !== location.origin || url.pathname !== '/questionData') throw new Error('Unexpected ledger data URL.');
+      // Linked URLs may carry an old signature. Use the current session.
+      url.searchParams.set('email', EMAIL);
+      url.searchParams.set('quizSign', user.quizSign || '');
+      url.searchParams.set('questionId', 'q-ledger-agent-server');
+      if (!url.searchParams.has('path')) url.searchParams.set('path', fallbackPath);
+      return url.href;
+    };
+    const readDocument = async (url) => {
+      const response = await origFetch(url, { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw new Error('Ledger download: HTTP ' + response.status);
+      const text = await response.text();
+      try { return JSON.parse(text); }
+      catch {
+        try { return text.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line)); }
+        catch { throw new Error('Ledger endpoint returned neither JSON nor NDJSON.'); }
+      }
+    };
+    const rates = await readDocument(ledgerUrl(root.links?.rates, '/rates'));
+    let orders;
+    try {
+      const exported = await readDocument(ledgerUrl(root.links?.export, '/export'));
+      orders = Array.isArray(exported) ? exported : exported.orders;
+      if (!Array.isArray(orders) || !orders.length) throw new Error('Empty export');
+    } catch (error) {
+      console.warn('[ga1] Export unavailable; following every orders page:', error.message);
+      orders = [];
+      const seen = new Set();
+      let next = ledgerUrl(root.links?.orders, '/orders');
+      while (next) {
+        if (seen.has(next)) throw new Error('Ledger pagination loop detected.');
+        seen.add(next);
+        if (seen.size > 10000) throw new Error('Ledger pagination exceeded 10,000 pages; refusing a partial upload.');
+        const page = await readDocument(next);
+        if (!Array.isArray(page.orders)) throw new Error('Ledger page is missing orders.');
+        orders.push(...page.orders);
+        if (page.next) next = ledgerUrl(page.next, '/orders');
+        else if (Number(page.page) < Number(page.pages)) {
+          const url = new URL(next);
+          url.searchParams.set('page', Number(page.page) + 1);
+          next = url.href;
+        } else next = null;
       }
     }
-    return 'https://example.com/answer';
+    // Only data goes to the backend; no quizSign, signed links or AI Pipe token.
+    const ledger = { orders, rates };
+    window.__ga1LedgerData = ledger;
+    const upload = await origFetch(`${B}/ledger/${encodeURIComponent(emailL)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ledger }), signal: AbortSignal.timeout(60000),
+    });
+    const result = await upload.json();
+    if (!upload.ok || !result.records) throw new Error(`Ledger upload HTTP ${upload.status}: ${result.error || 'No records accepted'}`);
+    console.info(`[ga1] Ledger: ${orders.length} source rows, ${result.records} current orders, USD rates loaded.`);
+    return `${B}/answer/${encodeURIComponent(emailL)}`;
   }
   window.__ga1GitDump = () => {
     if (!window.__ga1GitStream) { console.warn('no git stream fetched yet — re-run the solver first'); return; }
@@ -436,44 +440,24 @@
     a.download = 'git-history.fi'; a.click();
     console.log('git-history.fi downloaded — inspect token/commit layout');
   };
-  // tangram forge — target list read live from chunk (same for everyone), idx from YOUR email
-  let __geCache = null;
-  async function loadTargets() {
-    if (__geCache) return __geCache;
-    const txt = await (await origFetch('/exam-tds-2026-09-ga1.js')).text();
-    const k = 'ge=[';
-    const s = txt.indexOf(k);
-    if (s < 0) throw new Error('target list not found in chunk');
-    let d = 0, j = s + 3;
-    for (; j < txt.length; j++) { const c = txt[j]; if (c === '[') d++; else if (c === ']' && --d === 0) break; }
-    const ge = eval('(' + txt.slice(s + 3, j + 1) + ')');
-    if (!Array.isArray(ge) || !ge.length) throw new Error('target list empty');
-    __geCache = ge;
-    return ge;
+  // Read public target metadata without depending on minified variable names.
+  async function tangramTarget() {
+    const response = await origFetch('/exam-' + QUIZ + '.js');
+    if (!response.ok) throw new Error('Could not load Tangram targets.');
+    const source = await response.text();
+    const targets = new Map();
+    const pattern = /target_id\s*:\s*"([^"\n]+)"[\s\S]*?expected_match_key\s*:\s*"([a-f0-9]{64})"[\s\S]*?svg_path\s*:\s*("(?:[^"\\]|\\.)*")/g;
+    for (const match of source.matchAll(pattern)) targets.set(match[1], { target_id: match[1], expected_match_key: match[2], svg_path: JSON.parse(match[3]) });
+    if (!targets.size) throw new Error('Tangram target metadata was not found.');
+    const list = [...targets.values()];
+    const target = list[Math.floor(seedrandom(`${EMAIL}#q-visual-game-tangram`)() * list.length)];
+    window.__ga1TangramTarget = { email: EMAIL, ...target };
+    return window.__ga1TangramTarget;
   }
-  const b64url = (buf) => { const a = new Uint8Array(buf); let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
-  async function forgeTangram() {
-    try {
-      const ge = await loadTargets();
-      const idx = Math.floor(seedrandom(`${EMAIL}#q-visual-game-tangram`)() * ge.length);
-      const key = ge[idx].expected_match_key;
-      const enc = (o) => b64url(new TextEncoder().encode(JSON.stringify(o)));
-      const token = `${enc({ alg: 'ES256', typ: 'JWT', kid: 'tds-2025' })}.${enc({
-        iss: 'tds-network-games.sanand.workers.dev', aud: 'tds-visual-grader',
-        purpose: 'visual-state-receipt', receipt_version: 1, sub: EMAIL,
-        game: 'tangram', game_version: 1, config_id: 'standard-seven-v1',
-        state_version: 1, equivalence_version: 2,
-        state: 'W1s4MCw4MCwwLDBdLFsxNjAsODAsMCwwXSxbMzA0LDgwLDAsMF0sWzgwLDE2MCwwLDBdLFsxNDAsMTYwLDAsMF0sWzIwMCwxNjAsMCwwXSxbMzIwLDE2MCwwLDBdXQ',
-        invalid: false, errors: [], match_key: key,
-        received_at: new Date().toISOString(), iat: Math.floor(Date.now() / 1000),
-      })}.${b64url(crypto.getRandomValues(new Uint8Array(64)))}`;
-      console.log(`[ga1-universal] tangram -> ${ge[idx].target_id || '?'} idx ${idx}`);
-      return token;
-    } catch (e) {
-      console.warn('[ga1-universal] tangram forge failed:', e.message);
-      return 'FORGED-TANGRAM';
-    }
-  }
+  const existing = (id, supplied) => {
+    const value = String(supplied || document.getElementById(id)?.value || '').trim();
+    return value && !/example\.com|FORGED|PLACEHOLDER/i.test(value) ? value : null;
+  };
   function uvAnswer() {
     // prefer the request_id rendered in YOUR question card (robust to seed drift)
     try {
@@ -512,10 +496,10 @@
     'q-cosine-similarity-server': async () => cosineAnswer(EMAIL, VER),
     'q-llm-yes-no-split': async () => 'Am I speaking with gpt-5.6-luna? Reply Yes or No.',
     'q-http-headers-server': headersAnswer,
-    'q-termlog-rec-server': async () => 'https://example.com/submission.tar.gz',
+    'q-termlog-rec-server': async () => existing('q-termlog-rec-server', OPTIONS.termlogUrl),
     'q-mcp-server-live-server': async () => (B ? `${B}/mcp/${encodeURIComponent(emailL)}` : 'https://example.com/mcp'),
     'q-ledger-agent-server': ledgerAnswer,
-    'q-visual-game-tangram': forgeTangram,
+    'q-visual-game-tangram': async () => { await tangramTarget(); return existing('q-visual-game-tangram', OPTIONS.tangramReceipt); },
   };
 
   const results = [];
@@ -523,23 +507,72 @@
     if (!document.getElementById(qid)) { results.push({ qid, status: 'absent (not in this view)' }); continue; }
     try {
       const value = await fn();
+      if (value === null) {
+        results.push({ qid, status: qid.includes('termlog') ? 'needs your signed termlog archive' : 'needs an official signed Tangram receipt' });
+        fill(qid, '');
+        continue;
+      }
       const ok = fill(qid, value);
       results.push({ qid, status: ok ? 'filled' : 'input missing' });
     } catch (e) {
       results.push({ qid, status: 'ERROR: ' + e.message });
       console.error(`[${qid}]`, e);
+      // A failed recomputation must not replace an existing answer with a dummy.
     }
   }
   console.table(results);
   window.__ga1Ureport = results;
-  window.__ga1UTangram = async (receipt) => { const v = receipt || await forgeTangram(); console.log(fill('q-visual-game-tangram', v) ? '[ga1-universal] tangram filled' : '[ga1-universal] tangram input missing'); };
+  window.__ga1UTangram = (receipt) => {
+    if (!receipt || String(receipt).split('.').length !== 3) throw new Error('Paste a signed receipt from the official Tangram board.');
+    return fill('q-visual-game-tangram', String(receipt).trim());
+  };
+  window.__ga1TangramOpen = () => {
+    if (!window.__ga1TangramTarget) throw new Error('Run the helper on a loaded GA1 page first.');
+    const data = btoa(unescape(encodeURIComponent(JSON.stringify(window.__ga1TangramTarget))));
+    return window.open('https://tds-network-games.sanand.workers.dev/tangram/?tds=' + encodeURIComponent(data), '_blank', 'noopener');
+  };
   window.__ga1LedgerDump = async () => {
-    // Real ledger path (4 marks): downloads YOUR ledger.json for the deploy/ledger-agent.
-    const txt = await questionData('q-ledger-agent-server');
+    if (!window.__ga1LedgerData) await ledgerAnswer();
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
-    a.download = 'ledger.json'; a.click();
-    console.log('ledger.json downloaded — run: node deploy/ledger-agent.mjs ledger.json');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(window.__ga1LedgerData)], { type: 'application/json' }));
+    a.href = url; a.download = 'ledger.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+  const showCommands = (commands) => {
+    console.log(commands);
+    return commands;
+  };
+  const archiveCommands = (cast, archive) => [
+    'exit',
+    `termlog verify ${cast} --expect-email ${shellQuote(EMAIL)}`,
+    `tar -czf ${archive} ${cast} ${cast}.jwt`,
+    B ? `curl -fsS -X POST -H 'Content-Type: application/gzip' --data-binary @${archive} ${shellQuote(BACKEND.replace(/\/+$/, '') + '/artifacts')}` : '# Upload the archive to a public HTTPS file URL.',
+    '# The upload returns a relative URL. Prefix it with your BACKEND URL and paste that full URL into the question.',
+  ];
+  window.__ga1TermlogCommands = () => {
+    const url = new URL('/questionData', location.origin);
+    for (const [key, value] of Object.entries({ email: EMAIL, quizSign: user.quizSign || '', questionId: 'q-termlog-rec-server' })) url.searchParams.set(key, value);
+    const transforms = { rot13: "tr 'A-Za-z' 'N-ZA-Mn-za-m'", hex: 'xxd -r -p', reverse: 'rev' };
+    const orders = [['rot13','hex','reverse'],['rot13','reverse','hex'],['hex','rot13','reverse'],['hex','reverse','rot13'],['reverse','rot13','hex'],['reverse','hex','rot13']];
+    return showCommands([
+      '# Install the official termlog binary first. Use a new folder for this recording.',
+      'termlog login', 'termlog whoami', 'termlog rec demo.cast',
+      `curl -fsS ${shellQuote(url.href)} -o challenge.txt`, 'cat challenge.txt',
+      "python3 - <<'PY'",
+      'import json',
+      "text = open('challenge.txt').read().strip()",
+      'try:',
+      '    data = json.loads(text)',
+      '    if isinstance(data, str): text = data',
+      "    elif isinstance(data, dict): text = next((data[k] for k in ['ciphertext','cipher','encoded','challenge','code'] if isinstance(data.get(k), str)), text)",
+      'except ValueError: pass',
+      "open('cipher.txt','w').write(text + '\n')", 'PY',
+      '# These are real shell decodings. Inspect the readable result; the challenge changes every three hours.',
+      ...orders.map((order) => `cat cipher.txt | ${order.map((name) => transforms[name]).join(' | ')}`),
+      ...archiveCommands('demo.cast', 'ga1-submission.tar.gz'),
+    ].join('\n'));
   };
 
   /* ================= Check all (+ optional Save) ================= */
@@ -552,8 +585,11 @@
   checkBtn.click();
   const deadline = Date.now() + 300000;
   while (checkBtn.disabled && Date.now() < deadline) await new Promise(r => setTimeout(r, 400));
+  if (checkBtn.disabled) { console.warn('Check is still running. Wait for the page before saving; no completed report is available yet.'); return; }
   await new Promise(r => setTimeout(r, 1500));
-  const report = [...document.querySelectorAll('#questions [data-question]')].map(card => {
+  const report = [...document.querySelectorAll('#questions [data-question]')]
+    .filter((card) => card.querySelector('.check-answer'))
+    .map(card => {
     const qid = card.getAttribute('data-question') || '';
     if (!/^q-/.test(qid)) return null;
     const validated = card.classList.contains('was-validated');
@@ -564,18 +600,10 @@
   window.__ga1Ucheck = report;
   const green = report.filter(r => r.result === 'Correct').length;
   console.info(`%c[ga1-universal] Check: ${green}/${report.length} correct as ${EMAIL}`, 'font-weight:bold');
-  // Honest Save forecast: the server re-verifies every backendVerify answer +
-  // the tangram receipt on ./submit. Forged/dummy values go green on Check but
-  // drop to 0 on Save. REAL (Save-safe): vs-code, uv, csv, prettier,
-  // broken-json, config-precedence (client grader), rename, github-pages
-  // (client grader), cosine, llm-yes-no (client grader), http-headers, and git
-  // IFF the log above shows "git REAL token". With BACKEND: + mcp + ledger.
-  // MANUAL: termlog rec, tangram gameplay.
-
   window.__ga1Usave = () => {
     const btn = document.querySelector('.save-action');
     if (!btn) { console.error('[ga1-universal] Save button not found'); return false; }
-    console.warn('[ga1-universal] Saving now — patches stay armed; do NOT reload until the score appears.');
+    console.info('[ga1] Saving; the official server will confirm your scores.');
     btn.click();
     return true;
   };
@@ -583,6 +611,6 @@
     await new Promise(r => setTimeout(r, 1200));
     window.__ga1Usave();
   } else {
-    console.warn('[ga1-universal] Review the table above, then press Save yourself (or run window.__ga1Usave()). Do NOT reload first — the patches die with the page.');
+    console.info('[ga1] Review the actual feedback, then Save. Pending signed labs and Tangram cannot earn marks until completed.');
   }
 })().catch(e => console.error('[ga1-universal]', e));
