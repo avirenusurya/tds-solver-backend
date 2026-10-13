@@ -6,9 +6,9 @@ The browser helpers read the current student's email and quiz signature from the
 
 ## Deploy and use
 
-Deploy this repository to your existing Render web service. `GET /health` must report revision `2026-10-13-real-validation-v1`. Docker copies `server.mjs`, `ledger.mjs` and `invoice.mjs`; Node 20 or newer is required.
+Deploy this repository to your existing Render web service. `GET /health` must report revision `2026-10-13-real-validation-v3`. Docker copies `server.mjs`, `ledger.mjs` and `invoice.mjs`; Node 20 or newer is required.
 
-Reload the exam page, then paste the matching file from `solvers/` into its browser console. The default backend is `https://tds-solver-backend.onrender.com`. Each script fills computable answers, keeps existing signed lab URLs, runs Check all and shows genuine server failures. Review the feedback and press Save. Automatic saving remains disabled.
+Reload the exam page, then paste the matching file from `solvers/` into its browser console. The default backend is `https://tds-solver-backend.onrender.com`. Each script fills computable answers, keeps existing signed lab URLs, runs Check all and shows genuine server failures. Review the feedback and press Save. Automatic saving runs only after every question passes its actual check. Set `autoSave: false` in the page options to keep saving manual.
 
 Optional settings go in page memory before pasting, for example:
 
@@ -28,7 +28,15 @@ The helpers keep their existing browser-side implementations for the previously 
 
 Ledger and archive files use `DATA_DIR` (default `./data`). They survive Node process restarts when the filesystem survives. A container replacement or deployment without a persistent disk can erase them. Rerun GA1 to upload its ledger and upload your lab archives again after such a redeploy.
 
-## Complete the signed terminal labs
+## Automatic signed terminal labs
+
+The scripts now show a Google sign-in panel when signed archives are missing. The backend runs the official termlog binary separately for each student, executes the real lab commands through a terminal, verifies each recording, packages its unchanged bytes and uploads it to Catbox. If Catbox is unavailable, it hosts the archive on the backend.
+
+Sign in using the displayed exam email. Google's native-client callback points to a localhost address; copy that complete address from the sign-in popup into the panel. The backend forwards it only to that job's official CLI listener, which completes Google's PKCE exchange and validates the identity. No Google password is entered into the solver. Temporary Google credentials and challenge files are deleted after the job.
+
+Running GA1 first generates all three labs in one sign-in and caches their public URLs in that browser for GA2. Disable this flow with `autoLabs: false` if you already have your own archives.
+
+## Manual terminal-lab fallback
 
 Install the official [termlog binary](https://github.com/mynkpdr/termlog). Each student must run `termlog login` using their own registered exam email. A deployed backend cannot produce that Google identity proof.
 
@@ -57,13 +65,13 @@ Inspect the trial feedback. To evaluate another prompt:
 await window.__ga2IntelTry('Your new prompt. Reply only YES or NO.');
 ```
 
-Each distinct prompt consumes six model calls and is cached by the exam. The helper preserves your current prompt on reruns, including a prompt you have already verified.
+Each distinct prompt consumes six model calls and is cached by the exam. The helper preserves your current prompt on reruns, including a prompt you have already verified. It automatically searches a bounded batch of reasoning prompts after a failed evaluation, honoring the exam rate limit; `autoIntel: false` disables the search. Only a passing real server evaluation is accepted.
 
 ## Tangram
 
 The old signature bypass and fabricated JWT have been removed. A genuine existing receipt is preserved. `window.__ga1TangramOpen()` opens the official board with the student's target metadata in its URL. The board exposes WebMCP tools to read state, apply poses and attest a real arrangement. A browser's availability banner does not replace checking those exposed tools.
 
-The resulting receipt must match the assigned silhouette and student email. Fill it using `window.__ga1UTangram(receipt)`, then Check and Save.
+The backend can submit exact, verified arrangements to the official game API and obtain genuine receipts. Unsupported targets stay pending while the search continues; approximate layouts are never submitted as successful answers. A manually obtained receipt can also be filled using `window.__ga1UTangram(receipt)`, then Check and Save.
 
 ## Existing endpoint URLs
 

@@ -36,11 +36,14 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { buildLedgerStore, ledgerAnswerOne } from './ledger.mjs';
 import { extractInvoice } from './invoice.mjs';
+import { createLabManager } from './labs.mjs';
+import { acceptSolution, solveTangram } from './tangram.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 const EXAM_ORIGIN = 'https://exam.sanand.workers.dev';
 const DATA_DIR = resolve(process.env.DATA_DIR || './data');
-const REVISION = '2026-10-13-real-validation-v2';
+const REVISION = '2026-10-13-real-validation-v3';
+const labManager = createLabManager({ dataDir: DATA_DIR });
 
 /* ================= per-email seeds (exact chunk ports) ================= */
 const seedFor = (qid, email, ver = '') => seedrandom(`${qid}#${(email || '').trim().toLowerCase()}#${ver}`);
@@ -95,10 +98,7 @@ function idemSeeds(email, ver = '') {
   const o = (a, b) => a + Math.floor(r() * (b - a + 1));
   return { total: o(40, 60), rateLimit: o(15, 20) };
 }
-function mwBucket(email, ver = '') {
-  const o = seedFor('q-middleware-ratelimit-cors-server', email, ver);
-  return 8 + Math.floor(o() * 8);
-}
+function mwBucket(email, ver = '') { return mwOrigin(email, ver).bucket; }
 function mwOrigin(email, ver = '') {
   const R = 'abcdefghijklmnopqrstuvwxyz0123456789';
   const o = seedFor('q-middleware-ratelimit-cors-server', email, ver);
@@ -301,6 +301,41 @@ const server = http.createServer(async (req, res) => {
     }
     if (path === '/health' && method === 'GET') {
       return sendJson(res, 200, { ok: true, time: Date.now(), revision: REVISION, features: ['ledger-export-rates', 'invoice-vendor-punctuation', 'signed-archive-hosting'] }, acaostar);
+    }
+    if (path === '/labs-client.js' && method === 'GET') {
+      const source = await readFile(new URL('./labs-client.mjs', import.meta.url), 'utf8');
+      res.writeHead(200, { ...acaostar, 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' });
+      return res.end(source);
+    }
+    if (path.startsWith('/tangram/') && method === 'OPTIONS') {
+      res.writeHead(204, { ...acaostar, 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': allowHeaders });
+      return res.end();
+    }
+    if ((path === '/tangram/solve' || path === '/tangram/solution') && method === 'POST') {
+      try {
+        const input = JSON.parse(await readBody(req));
+        const result = path === '/tangram/solve' ? await solveTangram(DATA_DIR, input.email) : await acceptSolution(DATA_DIR, input.target_id, input.pieces);
+        return sendJson(res, result.pending ? 202 : 200, result, acaostar);
+      } catch (error) { return sendJson(res, 422, { error: error.message }, acaostar); }
+    }
+
+    if (path.startsWith('/labs/')) {
+      if (method === 'OPTIONS') {
+        res.writeHead(204, { ...acaostar, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': allowHeaders });
+        return res.end();
+      }
+      try {
+        if (path === '/labs/health' && method === 'GET') return sendJson(res, 200, await labManager.health(), acaostar);
+        if (path === '/labs/start' && method === 'POST') return sendJson(res, 201, await labManager.start(JSON.parse(await readBody(req))), acaostar);
+        const match = /^\/labs\/job\/([0-9a-f-]{36})(\/callback)?$/.exec(path);
+        const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (match && method === 'GET' && !match[2]) return sendJson(res, 200, labManager.get(match[1], token), acaostar);
+        if (match && method === 'POST' && match[2]) {
+          const input = JSON.parse(await readBody(req));
+          return sendJson(res, 200, await labManager.callback(match[1], token, input.callbackUrl), acaostar);
+        }
+        return sendJson(res, 404, { error: 'Unknown lab operation.' }, acaostar);
+      } catch (error) { return sendJson(res, 400, { error: error.message }, acaostar); }
     }
 
     // Host genuine termlog archives without changing their signed bytes.

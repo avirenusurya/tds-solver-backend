@@ -23,7 +23,7 @@ async function runHelper(ga, fields, fetch) {
     __seedModule: { default: seedrandom }, fetch,
     crypto: { subtle: Object.create(subtlePrototype) },
     document: { getElementById: (id) => inputs[id] || null, querySelector: () => null, body: { textContent: '' } },
-    localStorage: { getItem: () => JSON.stringify({ email: 'learner@example.invalid', quizSign: 'fresh-session-signature' }) },
+    localStorage: { getItem: (key) => key === 'user' ? JSON.stringify({ email: 'learner@example.invalid', quizSign: 'fresh-session-signature' }) : null, setItem() {} },
     location: { origin: 'https://exam.sanand.workers.dev', pathname: '/tds-2026-09-' + ga },
     HTMLInputElement: Input, HTMLTextAreaElement: class {},
     console: Object.fromEntries(['log', 'info', 'warn', 'error', 'table'].map((name) => [name, (...args) => logs.push([name, ...args])])),

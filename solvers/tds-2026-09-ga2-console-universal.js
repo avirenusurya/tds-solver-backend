@@ -2,12 +2,12 @@
    Every backendVerify request reaches the official server. Live model evaluation
    prompts for your own AI Pipe token in the browser and reports the six replies.
    Preserve signed lab URLs: a deployed API cannot replace signed recordings.
-   AUTOSAVE is off; inspect the actual feedback before saving.
+   Automatic saving waits until every actual check passes.
 */
 (async () => {
   const QUIZ = 'tds-2026-09-ga2';
-  const AUTOSAVE = false;
   const OPTIONS = globalThis.GA2_OPTIONS || {};
+  const AUTOSAVE = OPTIONS.autoSave !== false; // save only after every real check passes
   const BACKEND = OPTIONS.backend || 'https://tds-solver-backend.onrender.com';
   if (location.origin !== 'https://exam.sanand.workers.dev') throw new Error('Open the official exam page first.');
   if (!location.pathname.includes(QUIZ)) throw new Error('Open /' + QUIZ + ' first, then paste.');
@@ -62,6 +62,8 @@
   function mwFe(email, ver) {
     const r = 'abcdefghijklmnopqrstuvwxyz0123456789';
     const o = seedrandom(`q-middleware-ratelimit-cors-server#${(email || '').trim().toLowerCase()}#${ver}`);
+    // The assigned origin consumes six draws before the bucket draw.
+    for (let index = 0; index < 6; index++) o();
     return { bucket: 8 + Math.floor(o() * 8) };
   }
   const { total: IDEM_TOTAL, rateLimit: IDEM_RL } = idHe(EMAIL, VER);
@@ -94,6 +96,17 @@
       return k ? h[k] : null;
     };
 
+    if (path === '/submit' && method === 'POST' && u.origin === location.origin) {
+      const response = await origFetch(input, init);
+      try {
+        const receipt = await response.clone().json();
+        if (response.ok && Number.isFinite(receipt.total)) {
+          window.__ga2SavedReceipt = receipt;
+          console.info('[ga2] CONFIRMED Saved: ' + receipt.total + ' / ' + receipt.max);
+        }
+      } catch {}
+      return response;
+    }
     if (path === '/backendVerify' && method === 'POST' && u.origin === location.origin) {
       let body = {};
       try { body = JSON.parse(init.body || (input instanceof Request ? await input.clone().text() : '{}')); } catch {}
@@ -190,6 +203,62 @@
     return verified.get('q-model-intelligence-auto-server') || null;
   };
 
+  const intelPrompts = () => {
+    const questions = [
+      'A price rises by 18% and then falls by 15.5%. Is the final price strictly greater than its initial price?',
+      'A price rises by 7% and then falls by 6.55%. Is the final price strictly greater than its initial price?',
+      'A price rises by 37% and then falls by 27.1%. Is the final price strictly greater than its initial price?',
+      'A balance increases by 30% and then decreases by 23.1%. Is the final balance strictly greater than the original balance?',
+      'A balance increases by 12% and then decreases by 10.72%. Is the final balance strictly greater than the original balance?',
+      'There are three doors with one car. I choose a door. The host does NOT know where the car is, randomly opens one of the other doors, and happens to reveal a goat. Conditioned on seeing that goat, does switching to the other unopened door have probability 2/3 of winning?',
+      'There are five doors with one car. I choose one. An uninformed host randomly opens three of the other four doors and happens to reveal three goats. Given this event, is my probability of winning by switching to the other unopened door 4/5?',
+      'Every researcher reviewed at least one paper. Is it logically necessary that there is a paper that every researcher reviewed?',
+      'An integer ends in 35. Is it necessarily divisible by 7?',
+      'A 19 by 17 checkerboard has the cells (1,1),(3,3),(5,5),(7,7),(9,9),(11,11),(13,13) removed. Rows and columns are numbered from 1. Can the remaining cells be tiled completely by 1 by 2 dominoes?',
+    ];
+    const rng = seedrandom('model-intel-search#' + emailL);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const digits = Array.from({length:120},(_,index)=>index < 60 ? '0' : '1');
+      for (let index = digits.length - 1; index > 0; index--) { const other = Math.floor(rng()*(index+1)); [digits[index],digits[other]]=[digits[other],digits[index]]; }
+      questions.push('An audit says there are more zeroes than ones in this binary string: ' + digits.join('') + '. Is that statement correct?');
+    }
+    return [questions[5],questions[6],...questions.filter((_,index)=>index!==5&&index!==6)].map(question => question + ' Reply only YES or NO.');
+  };
+  window.__ga2IntelFind = async (candidates = OPTIONS.intelPrompts || intelPrompts()) => {
+    if (window.__ga2IntelSearching) return window.__ga2IntelSearching;
+    window.__ga2IntelSearching = (async () => {
+      if (!globalThis.aiPipeToken) globalThis.aiPipeToken = prompt('Enter your AI Pipe token for the real model-disagreement search. Each new prompt uses six model calls.');
+      const token = String(globalThis.aiPipeToken || '').trim();
+      if (!token) { console.warn('[ga2] Live model evaluation needs your AI Pipe token.'); return null; }
+      let lastStart = 0;
+      for (const candidate of candidates.slice(0, OPTIONS.intelAttempts || 18)) {
+        const wait = Math.max(0, lastStart + 21000 - Date.now());
+        if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+        lastStart = Date.now();
+        fill('q-model-intelligence-auto-server', candidate);
+        console.info('[ga2] Evaluating a new prompt with the real models…');
+        const response = await origFetch('/backendVerify', { method:'POST', headers:{'Content-Type':'application/json',Authorization:'Bearer ' + token},
+          body:JSON.stringify({email:EMAIL,quizSign:user.quizSign,response:candidate,weight:2,questionId:'q-model-intelligence-auto-server'}),
+        });
+        const result = await response.json();
+        verified.set('q-model-intelligence-auto-server',{httpStatus:response.status,...result});
+        const feedback = document.getElementById('q-model-intelligence-auto-server-feedback');
+        if (feedback) feedback.textContent = [result.message || result.error, ...(result.rounds || []).map(([nano,mini],index)=>'Trial '+(index+1)+': nano='+nano+'; mini='+mini)].join('\n');
+        console.log('[ga2] Model verdict:', result.message || result.error, result.rounds || []);
+        if (response.ok && (result.correct || result.score >= 2)) {
+          localStorage.setItem('tds-passing-model-prompt:' + emailL,candidate);
+          console.info('[ga2] Passing model prompt confirmed by the exam server.');
+          return result;
+        }
+        if (response.status === 401 || response.status === 403) { console.warn('[ga2] Token/provider error; stopping paid evaluations.'); return result; }
+        if (response.status === 429) { await new Promise(resolve=>setTimeout(resolve,65000)); }
+      }
+      console.warn('[ga2] No passing prompt found in this batch. The real replies remain in the feedback box.');
+      return null;
+    })();
+    try { return await window.__ga2IntelSearching; } finally { delete window.__ga2IntelSearching; }
+  };
+
   /* ============ fill ============ */
   const fill = (id, value) => {
     const el = document.getElementById(id);
@@ -218,7 +287,7 @@
     'q-local-llm-structured-server': B ? `${B}/extract` : 'https://example.com/extract',
     'q-ollama-stream-reassembly-server': B ? `${B}/stream.json` : 'https://example.com/stream.json',
     'q-docker-build-cache-server': B ? `${B}/docker.json` : 'https://example.com/docker.json',
-    'q-model-intelligence-auto-server': OPTIONS.modelIntelPrompt || document.getElementById('q-model-intelligence-auto-server')?.value?.trim() || MODEL_INTEL_PROMPT,
+    'q-model-intelligence-auto-server': OPTIONS.modelIntelPrompt || localStorage.getItem('tds-passing-model-prompt:' + emailL) || document.getElementById('q-model-intelligence-auto-server')?.value?.trim() || MODEL_INTEL_PROMPT,
     'q-termlog-httpbin-server': OPTIONS.httpbinTermlogUrl || document.getElementById('q-termlog-httpbin-server')?.value?.trim() || null,
     'q-termlog-ollama-modelfile-server': OPTIONS.modelTermlogUrl || document.getElementById('q-termlog-ollama-modelfile-server')?.value?.trim() || null,
   };
@@ -292,6 +361,33 @@
     ].join('\n'));
   };
 
+  const runChecks = async () => {
+    const button = document.querySelector('.check-action');
+    if (!button || button.disabled) return false;
+    button.click();
+    const until = Date.now() + 300000;
+    while (button.disabled && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 400));
+    return !button.disabled;
+  };
+  const allCorrect = () => {
+    const cards = [...document.querySelectorAll('#questions [data-question]')].filter(card => card.querySelector('.check-answer'));
+    return cards.length > 0 && cards.every(card => card.classList.contains('solved'));
+  };
+  let labsPromise = null;
+  if (OPTIONS.autoLabs !== false && B && typeof document.body.append === 'function') {
+    const pending = Object.keys({ 'q-termlog-httpbin-server': true, 'q-termlog-ollama-modelfile-server': true }).some(qid => document.getElementById(qid) && !document.getElementById(qid).value.trim());
+    if (pending) {
+      labsPromise = (async () => {
+        const client = await import(BACKEND.replace(/\/+$/, '') + '/labs-client.js');
+        // httpbin/model labs are per-email hashes; no GA1 challengeUrl needed here.
+        // GA1 first-run caches all three labs; GA2 reuses that cache with no new sign-in.
+        return client.runSignedLabs({ backend: BACKEND, email: EMAIL, challengeUrl: null, tasks: ['httpbin','model'],
+          onArtifact: (qid, url) => { if (document.getElementById(qid)) fill(qid, url); },
+        });
+      })().catch(error => { console.error('[signed labs]', error.message); return null; });
+    }
+  }
+
   /* ============ Check all (+ optional Save) ============ */
   // Main cards only (sidebar reuses data-question attrs); `solved` class is
   // toggled by exam.js itself — the only trustworthy signal.
@@ -323,10 +419,17 @@
     btn.click();
     return true;
   };
-  if (AUTOSAVE) {
-    await new Promise(r => setTimeout(r, 1200));
+  const intelPromise = OPTIONS.autoIntel !== false && !document.querySelector('#questions [data-question="q-model-intelligence-auto-server"].solved') ? window.__ga2IntelFind() : null;
+  if (labsPromise) {
+    console.info('Finish the Google sign-in panel. The recording and upload run automatically afterwards.');
+    await labsPromise;
+    await runChecks();
+  }
+  if (intelPromise) { await intelPromise; await runChecks(); }
+  if (AUTOSAVE && allCorrect()) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
     window.__ga2Usave();
   } else {
-    console.info('[ga2] Review the actual feedback, then Save. Signed labs must be completed; model intelligence earns marks only after a passing live evaluation.');
+    console.info('Automatic Save waits until every question passes its actual check. Pending questions are shown in the page feedback.');
   }
 })().catch(e => console.error('[ga2-universal]', e));

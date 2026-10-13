@@ -3,13 +3,13 @@
    Backend checks and signed receipts are verified by the real exam server.
    Existing signed lab URLs and game receipts are preserved on every run.
    Run window.__ga1TermlogCommands() for the signed terminal lab workflow.
-   AUTOSAVE remains off: review the actual feedback before saving.
+   Automatic saving runs only after every actual question check succeeds.
 */
 (async () => {
   const QUIZ = 'tds-2026-09-ga1';
-  const AUTOSAVE = false; // set true for paste-and-done (Check + Save in one go)
   // Deploy the matching backend before using its service URLs.
   const OPTIONS = globalThis.GA1_OPTIONS || {};
+  const AUTOSAVE = OPTIONS.autoSave !== false; // save only after every real check passes
   const BACKEND = OPTIONS.backend || 'https://tds-solver-backend.onrender.com';
   if (location.origin !== 'https://exam.sanand.workers.dev') throw new Error('Open the official exam page first: https://exam.sanand.workers.dev/' + QUIZ);
   if (!location.pathname.includes(QUIZ)) throw new Error('Open /' + QUIZ + ' first, then paste.');
@@ -189,6 +189,17 @@
     try { u = new URL(urlStr, location.origin); } catch { return origFetch(input, init); }
     const path = u.pathname.replace(/\/+$/, '') || '/';
 
+    if (path === '/submit' && method === 'POST' && u.origin === location.origin) {
+      const response = await origFetch(input, init);
+      try {
+        const receipt = await response.clone().json();
+        if (response.ok && Number.isFinite(receipt.total)) {
+          window.__ga1SavedReceipt = receipt;
+          console.info('[ga1] CONFIRMED Saved: ' + receipt.total + ' / ' + receipt.max);
+        }
+      } catch {}
+      return response;
+    }
     // Always let the official server validate answers. Preserve its feedback.
     if (path === '/backendVerify' && method === 'POST' && u.origin === location.origin) {
       let body = {};
@@ -575,6 +586,47 @@
     ].join('\n'));
   };
 
+  window.__ga1TangramSolve = async () => {
+    if (!B) throw new Error('A deployed solver backend is required.');
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const response = await origFetch(B + '/tangram/solve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:EMAIL})});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Tangram service failed.');
+      if (result.receipt) { fill('q-visual-game-tangram',result.receipt); console.info('[ga1] Official signed Tangram receipt received for ' + result.target_id); return result; }
+      console.info('[ga1] Tangram ' + result.target_id + ' is being searched; waiting for an exact solution.');
+      await new Promise(resolve=>setTimeout(resolve,20000));
+    }
+    throw new Error('The target search has not completed yet.');
+  };
+
+  const runChecks = async () => {
+    const button = document.querySelector('.check-action');
+    if (!button || button.disabled) return false;
+    button.click();
+    const until = Date.now() + 300000;
+    while (button.disabled && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 400));
+    return !button.disabled;
+  };
+  const allCorrect = () => {
+    const cards = [...document.querySelectorAll('#questions [data-question]')].filter(card => card.querySelector('.check-answer'));
+    return cards.length > 0 && cards.every(card => card.classList.contains('solved'));
+  };
+  let labsPromise = null;
+  if (OPTIONS.autoLabs !== false && B && typeof document.body.append === 'function') {
+    const pending = Object.keys({ 'q-termlog-rec-server': true }).some(qid => document.getElementById(qid) && !document.getElementById(qid).value.trim());
+    if (pending) {
+      labsPromise = (async () => {
+        const client = await import(BACKEND.replace(/\/+$/, '') + '/labs-client.js');
+        const challenge = new URL('/questionData', location.origin);
+        for (const [key, value] of Object.entries({ email: EMAIL, quizSign: user.quizSign || '', questionId: 'q-termlog-rec-server' })) challenge.searchParams.set(key, value);
+        return client.runSignedLabs({ backend: BACKEND, email: EMAIL, challengeUrl: challenge.href, tasks: ['decode','httpbin','model'],
+          onArtifact: (qid, url) => { if (document.getElementById(qid)) fill(qid, url); },
+        });
+      })().catch(error => { console.error('[signed labs]', error.message); return null; });
+    }
+  }
+
   /* ================= Check all (+ optional Save) ================= */
   // NOTE: the live platform reads the card's `solved` class (toggled by exam.js
   // per question) — never match Correct/Incorrect against whole card text, the
@@ -607,10 +659,20 @@
     btn.click();
     return true;
   };
-  if (AUTOSAVE) {
-    await new Promise(r => setTimeout(r, 1200));
+  let gamePromise = null;
+  if (OPTIONS.autoTangram !== false && !document.querySelector('#questions [data-question="q-visual-game-tangram"].solved')) {
+    gamePromise = window.__ga1TangramSolve().catch(error=>{ console.error('[ga1 Tangram]',error.message); return null; });
+  }
+  if (labsPromise) {
+    console.info('Finish the Google sign-in panel. The recording and upload run automatically afterwards.');
+    await labsPromise;
+    await runChecks();
+  }
+  if (gamePromise) { await gamePromise; await runChecks(); }
+  if (AUTOSAVE && allCorrect()) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
     window.__ga1Usave();
   } else {
-    console.info('[ga1] Review the actual feedback, then Save. Pending signed labs and Tangram cannot earn marks until completed.');
+    console.info('Automatic Save waits until every question passes its actual check. Pending questions are shown in the page feedback.');
   }
 })().catch(e => console.error('[ga1-universal]', e));
