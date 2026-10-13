@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import crypto from 'node:crypto';
 
 const quote = (value) => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+const redact = (text) => String(text || '').replace(/(code|state|refresh_token|id_token|access_token|client_secret)=[^&\s"']+/g, '$1=REDACTED').slice(-500);
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const taskIds = { decode: 'q-termlog-rec-server', httpbin: 'q-termlog-httpbin-server', model: 'q-termlog-ollama-modelfile-server' };
 const hashEmail = (email) => {
@@ -167,7 +168,8 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
       const ready = await this.health(); if (!ready.available) throw new Error(ready.error);
       const id = crypto.randomUUID(), token = crypto.randomBytes(32).toString('base64url');
       const dir = join(dataDir, 'lab-jobs', id), authDir = join(dir, 'auth'); await mkdir(authDir, { recursive: true, mode: 0o700 });
-      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Starting Google sign-in.', artifacts: {}, created: Date.now() };
+      await mkdir(join(dir, 'config'), { recursive: true, mode: 0o700 });
+      const job = { id, token, email, dir, authDir, tasks, challengeUrl, status: 'starting', message: 'Starting Google sign-in.', artifacts: {}, created: Date.now(), loginStarted: Date.now(), loginDiag: '' };
       jobs.set(id, job);
       const env = { ...process.env, TERMLOG_STATE_HOME: authDir, TERMLOG_CONFIG_HOME: join(dir, 'config') };
       delete env.TERMLOG_ALLOW_DEV_AUTH;
@@ -183,20 +185,21 @@ export function createLabManager({ dataDir, termlog = process.env.TERMLOG_BIN ||
           job.publicAuthUrl = url.href; job.status = 'authentication'; job.message = 'Sign in with your registered Google email, then return the localhost callback URL.';
         }
       });
-      child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-500); }); // No credentials on stderr; timeout notice lives here.
-      child.on('error', async () => { job.status = 'error'; job.message = 'Could not start the official termlog binary.'; await rm(dir, { recursive: true, force: true }); });
-      child.on('close', (code) => {
+      child.stderr.on('data', (data) => { stderrTail = (stderrTail + data.toString()).slice(-2000); job.loginDiag = redact(stderrTail); }); // Credentials never appear on stderr; timeout/exit notes live here.
+      child.on('error', async (error) => { job.status = 'error'; job.message = `Could not start the official termlog binary (${redact(error.message)}).`; job.loginDiag = redact(stderrTail); await rm(dir, { recursive: true, force: true }); });
+      child.on('close', (code, signal) => {
         delete job.login;
+        job.loginDiag = redact(stderrTail);
         if (code === 0) void execute(job);
         else if (Date.now() - loginStarted > 290000) { job.status = 'error'; job.message = 'Google sign-in timed out after 5 minutes (official login limit). Repaste the helper for a fresh job and complete sign-in + paste within 5 minutes.'; void rm(dir, { recursive: true, force: true }); }
-        else { job.status = 'error'; job.message = 'Google sign-in failed or timed out. Start a new job.'; void rm(dir, { recursive: true, force: true }); }
+        else { const tail = redact(stderrTail).trim(); job.status = 'error'; job.message = `Google sign-in exited (code ${code ?? signal}) ${Math.round((Date.now() - loginStarted) / 1000)}s after start.${tail ? ' termlog said: ' + tail.slice(0, 220) : ' No termlog error text; the login popup may have been closed.'} Start a new job.`; void rm(dir, { recursive: true, force: true }); }
       });
       return { id, token };
     },
     get(id, token) {
       const job = jobs.get(id);
       if (!job || typeof token !== 'string' || token.length !== job.token.length || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(job.token))) throw new Error('Invalid job token.');
-      return { id: job.id, email: job.email, status: job.status, message: job.message, authUrl: job.publicAuthUrl, artifacts: job.artifacts };
+      return { id: job.id, email: job.email, status: job.status, message: job.message, authUrl: job.publicAuthUrl, artifacts: job.artifacts, diag: job.loginDiag || '' };
     },
     async callback(id, token, value) {
       this.get(id, token); const job = jobs.get(id);
