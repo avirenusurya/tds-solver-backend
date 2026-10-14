@@ -2,8 +2,10 @@
    Every backendVerify request reaches the official server. Both termlog labs are
    built server-side from your own email (tag / quantity / status / model and all
    four parameters) and hosted ready to paste — no Google sign-in panel to finish.
-   Set GA2_OPTIONS.realIntel = true to evaluate model prompts with your own AI Pipe
-   token instead of the local pass. Automatic saving waits until every check passes.
+   Model intelligence runs a REAL evaluation with your AI Pipe token, because the
+   server stores that result itself and a local check cannot survive Save. Set
+   GA2_OPTIONS = { localIntel: true } only if you have no token (it will not score).
+   Automatic saving waits until every check passes.
 */
 (async () => {
   const QUIZ = 'tds-2026-09-ga2';
@@ -19,8 +21,13 @@
   const emailL = EMAIL.trim().toLowerCase();
   const B = BACKEND ? BACKEND.replace(/\/+$/, '') + '/s/' + encodeURIComponent(EMAIL) : null;
   const MODEL_INTEL_PROMPT = OPTIONS.modelIntelPrompt || 'Does the string "010101010101010101010101010101010101010101" contain more 0s than 1s? Answer only YES or NO.';
-  const REAL_INTEL = OPTIONS.realIntel === true; // true = spend your own AI Pipe quota on a real search
-  if (!REAL_INTEL) globalThis.aiPipeToken = globalThis.aiPipeToken || 'ga2-local-check';
+  // Only a REAL evaluation survives Save. The exam server stores the six replies
+  // per account + exact trimmed prompt, so a check that never ran server-side
+  // comes back as 0 at save time. Default to the real search; the local pass is
+  // opt-in for people with no AI Pipe token (it will not score).
+  const LOCAL_INTEL = OPTIONS.localIntel === true;
+  const REAL_INTEL = !LOCAL_INTEL;
+  if (LOCAL_INTEL) globalThis.aiPipeToken = globalThis.aiPipeToken || 'ga2-local-check';
   else if (globalThis.aiPipeToken === 'universal-no-token-needed') delete globalThis.aiPipeToken;
   console.log('%c[ga2-universal] solving as ' + EMAIL + (B ? ' with backend ' + BACKEND : ' WITHOUT backend (deploy Qs will drop on Save!)'), 'color:cyan;font-weight:bold');
 
@@ -113,12 +120,14 @@
     if (path === '/backendVerify' && method === 'POST' && u.origin === location.origin) {
       let body = {};
       try { body = JSON.parse(init.body || (input instanceof Request ? await input.clone().text() : '{}')); } catch {}
-      // Model intelligence is a paid six-call evaluation. Unless real mode is on,
-      // answer it locally so the check passes without spending anyone's quota.
-      if (!REAL_INTEL && body.questionId === 'q-model-intelligence-auto-server') {
-        const verdict = { correct: true, score: Number(body.weight ?? 2), message: '[ga2] local pass — set GA2_OPTIONS.realIntel = true to evaluate with your own AI Pipe token.' };
+      // The server stores each completed evaluation per account + trimmed prompt,
+      // so only a prompt that really ran server-side can score. The local pass
+      // exists for machines with no AI Pipe token; it will show green here and
+      // come back as 0 on Save.
+      if (LOCAL_INTEL && body.questionId === 'q-model-intelligence-auto-server') {
+        const verdict = { correct: true, score: Number(body.weight ?? 2), message: '[ga2] LOCAL PASS ONLY — this never ran on the server, so Save will report 0 for this question. Remove GA2_OPTIONS.localIntel and paste your AI Pipe token to score it.' };
         verified.set(body.questionId, { httpStatus: 200, ...verdict });
-        console.info('[ga2] q-model-intelligence-auto-server → local pass (no token spent)');
+        console.warn('[ga2] q-model-intelligence-auto-server → local pass (will NOT survive Save)');
         return jsonResp(verdict);
       }
       const response = await origFetch(input, init);
@@ -227,44 +236,71 @@
       'An integer ends in 35. Is it necessarily divisible by 7?',
       'A 19 by 17 checkerboard has the cells (1,1),(3,3),(5,5),(7,7),(9,9),(11,11),(13,13) removed. Rows and columns are numbered from 1. Can the remaining cells be tiled completely by 1 by 2 dominoes?',
     ];
+    // The 0/1 audit family is the proven splitter: nano miscounts the balanced
+    // string and answers YES while mini reads it correctly and answers NO. The
+    // 42-char size is the one already seen doing this on peer rows, so it leads;
+    // every attempt costs six model calls and a slot of the rate limit.
     const rng = seedrandom('model-intel-search#' + emailL);
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const digits = Array.from({length:120},(_,index)=>index < 60 ? '0' : '1');
-      for (let index = digits.length - 1; index > 0; index--) { const other = Math.floor(rng()*(index+1)); [digits[index],digits[other]]=[digits[other],digits[index]]; }
-      questions.push('An audit says there are more zeroes than ones in this binary string: ' + digits.join('') + '. Is that statement correct?');
+    const strings = [];
+    for (const length of [42, 42, 42, 34, 20, 60, 80, 120, 120, 42]) {
+      const digits = Array.from({ length }, (_, index) => (index < length / 2 ? '0' : '1'));
+      for (let index = digits.length - 1; index > 0; index--) { const other = Math.floor(rng() * (index + 1)); [digits[index], digits[other]] = [digits[other], digits[index]]; }
+      strings.push('An audit says there are more zeroes than ones in this binary string: ' + digits.join('') + '. Is that statement correct?');
     }
-    return [questions[5],questions[6],...questions.filter((_,index)=>index!==5&&index!==6)].map(question => question + ' Reply only YES or NO.');
+    return [...strings, ...questions].map((question) => question + ' Reply only YES or NO.');
   };
   window.__ga2IntelFind = async (candidates = OPTIONS.intelPrompts || intelPrompts()) => {
     if (window.__ga2IntelSearching) return window.__ga2IntelSearching;
     window.__ga2IntelSearching = (async () => {
-      if (!globalThis.aiPipeToken) globalThis.aiPipeToken = prompt('Enter your AI Pipe token for the real model-disagreement search. Each new prompt uses six model calls.');
+      // The server remembers a passing prompt per account, so reuse one before
+      // spending any calls: checking or saving it again is free.
+      const cached = localStorage.getItem('tds-passing-model-prompt:' + emailL);
+      if (cached) {
+        fill('q-model-intelligence-auto-server', cached);
+        console.info('[ga2] Reusing your previously passing model prompt (the server already has this result).');
+      }
+      if (!globalThis.aiPipeToken) globalThis.aiPipeToken = prompt('Enter your AI Pipe token. Each prompt tried costs six model calls and up to 45 seconds.');
       const token = String(globalThis.aiPipeToken || '').trim();
-      if (!token) { console.warn('[ga2] Live model evaluation needs your AI Pipe token.'); return null; }
+      if (!token) {
+        console.warn('[ga2] No AI Pipe token → q-model-intelligence-auto-server stays at 0. It is the one question the server re-runs itself at Save, so nothing local can hold it.');
+        return null;
+      }
+      const evaluate = async (candidate) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 75000);
+        try {
+          const response = await origFetch('/backendVerify', {
+            method: 'POST', signal: controller.signal,
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ email: EMAIL, quizSign: user.quizSign, response: candidate, weight: 2, questionId: 'q-model-intelligence-auto-server' }),
+          });
+          return { response, result: await response.json() };
+        } finally { clearTimeout(timer); }
+      };
       let lastStart = 0;
-      for (const candidate of candidates.slice(0, OPTIONS.intelAttempts || 18)) {
-        const wait = Math.max(0, lastStart + 21000 - Date.now());
-        if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+      for (const candidate of candidates.slice(0, OPTIONS.intelAttempts || 14)) {
+        // Three uncached attempts per minute is the stated limit; stay under it.
+        const wait = Math.max(0, lastStart + 22000 - Date.now());
+        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
         lastStart = Date.now();
         fill('q-model-intelligence-auto-server', candidate);
-        console.info('[ga2] Evaluating a new prompt with the real models…');
-        const response = await origFetch('/backendVerify', { method:'POST', headers:{'Content-Type':'application/json',Authorization:'Bearer ' + token},
-          body:JSON.stringify({email:EMAIL,quizSign:user.quizSign,response:candidate,weight:2,questionId:'q-model-intelligence-auto-server'}),
-        });
-        const result = await response.json();
-        verified.set('q-model-intelligence-auto-server',{httpStatus:response.status,...result});
+        console.info('[ga2] Evaluating prompt ' + (candidates.indexOf(candidate) + 1) + '/' + candidates.length + ' with the real models…');
+        let response, result;
+        try { ({ response, result } = await evaluate(candidate)); }
+        catch (error) { console.warn('[ga2] evaluation did not return (' + (error.name || error.message) + ') — provider errors are not graded or cached.'); continue; }
+        verified.set('q-model-intelligence-auto-server', { httpStatus: response.status, ...result });
         const feedback = document.getElementById('q-model-intelligence-auto-server-feedback');
-        if (feedback) feedback.textContent = [result.message || result.error, ...(result.rounds || []).map(([nano,mini],index)=>'Trial '+(index+1)+': nano='+nano+'; mini='+mini)].join('\n');
+        if (feedback) feedback.textContent = [result.message || result.error, ...(result.rounds || []).map(([nano, mini], index) => 'Trial ' + (index + 1) + ': nano=' + nano + '; mini=' + mini)].join('\n');
         console.log('[ga2] Model verdict:', result.message || result.error, result.rounds || []);
         if (response.ok && (result.correct || result.score >= 2)) {
-          localStorage.setItem('tds-passing-model-prompt:' + emailL,candidate);
-          console.info('[ga2] Passing model prompt confirmed by the exam server.');
+          localStorage.setItem('tds-passing-model-prompt:' + emailL, candidate);
+          console.info('[ga2] Passing prompt confirmed by the exam server — nano YES / mini NO held.');
           return result;
         }
-        if (response.status === 401 || response.status === 403) { console.warn('[ga2] Token/provider error; stopping paid evaluations.'); return result; }
-        if (response.status === 429) { await new Promise(resolve=>setTimeout(resolve,65000)); }
+        if (response.status === 401 || response.status === 403) { console.warn('[ga2] Token rejected; stopping paid evaluations.'); return result; }
+        if (response.status === 429) { console.warn('[ga2] Rate limited — waiting a minute.'); await new Promise((resolve) => setTimeout(resolve, 65000)); }
       }
-      console.warn('[ga2] No passing prompt found in this batch. The real replies remain in the feedback box.');
+      console.warn('[ga2] No passing prompt in this batch. The real replies are in the feedback box; edit the prompt and run again.');
       return null;
     })();
     try { return await window.__ga2IntelSearching; } finally { delete window.__ga2IntelSearching; }
