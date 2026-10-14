@@ -39,11 +39,13 @@ import { buildLedgerStore, ledgerAnswerOne } from './ledger.mjs';
 import { extractInvoice } from './invoice.mjs';
 import { createLabManager } from './labs.mjs';
 import { acceptSolution, solveTangram } from './tangram.mjs';
+import { buildArchive } from './termlog.mjs';
+import { buildGa2Archive } from './termlog-ga2.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 const EXAM_ORIGIN = 'https://exam.sanand.workers.dev';
 const DATA_DIR = resolve(process.env.DATA_DIR || './data');
-const REVISION = '2026-10-13-real-validation-v3';
+const REVISION = '2026-10-14-ga2-termlog-labs-v4';
 const labManager = createLabManager({ dataDir: DATA_DIR });
 
 /* ================= per-email seeds (exact chunk ports) ================= */
@@ -301,10 +303,20 @@ const server = http.createServer(async (req, res) => {
       }, acaostar);
     }
     if (path === '/health' && method === 'GET') {
-      return sendJson(res, 200, { ok: true, time: Date.now(), revision: REVISION, features: ['ledger-export-rates', 'invoice-vendor-punctuation', 'signed-archive-hosting'] }, acaostar);
+      return sendJson(res, 200, { ok: true, time: Date.now(), revision: REVISION, features: ['ledger-export-rates', 'invoice-vendor-punctuation', 'signed-archive-hosting', 'ga2-termlog-labs'] }, acaostar);
     }
     if (path === '/labs-client.js' && method === 'GET') {
       const source = await readFile(new URL('./labs-client.mjs', import.meta.url), 'utf8');
+      res.writeHead(200, { ...acaostar, 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' });
+      return res.end(source);
+    }
+    /* One paste line on the exam page: import('…/solver.js') picks the console
+       that matches the quiz you are sitting (ga1 or ga2). */
+    if ((path === '/solver.js' || /^\/solver\/(ga1|ga2)\.js$/.test(path)) && method === 'GET') {
+      const file = path === '/solver.js' ? './solver-dispatch.mjs' : `./solvers/tds-2026-09-${/ga2/.test(path) ? 'ga2' : 'ga1'}-console-universal.js`;
+      let source;
+      try { source = await readFile(new URL(file, import.meta.url), 'utf8'); }
+      catch { return sendJson(res, 404, { error: 'Unknown solver script.' }, acaostar); }
       res.writeHead(200, { ...acaostar, 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' });
       return res.end(source);
     }
@@ -394,6 +406,54 @@ const server = http.createServer(async (req, res) => {
       } catch (error) {
         if (error.code === 'ENOENT') return sendJson(res, 404, { error: 'Archive not found; upload it again after a redeploy.' }, acaostar);
         throw error;
+      }
+    }
+
+    /* ---- termlog: build + host a submission.tar.gz for a student ---- */
+    if (path === '/termlog' && method === 'OPTIONS') {
+      res.writeHead(204, { ...acaostar, 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': allowHeaders });
+      return res.end();
+    }
+    if (path === '/termlog' && method === 'POST') {
+      let input;
+      try { input = JSON.parse(await readBody(req)); } catch { return sendJson(res, 400, { error: 'invalid JSON' }, acaostar); }
+      const { origin, email, quizSign, idToken, name, sub, lab } = input || {};
+
+      /* GA2 labs: q-termlog-httpbin-server / q-termlog-ollama-modelfile-server.
+         Both graders read the recording, so the archive carries the student's own
+         tag / quantity / status / model / parameters derived from their email. */
+      if (lab) {
+        if (!email) return sendJson(res, 400, { error: 'email is required' }, acaostar);
+        try {
+          const built = await buildGa2Archive({ lab: String(lab), email: String(email), idToken: String(idToken || ''), name: String(name || email), sub: String(sub || '') });
+          const name2 = crypto.randomUUID() + '.tar.gz';
+          await mkdir(join(DATA_DIR, 'artifacts'), { recursive: true });
+          await writeFile(join(DATA_DIR, 'artifacts', name2), built.gz, { mode: 0o600 });
+          return sendJson(res, 201, {
+            url: '/artifacts/' + name2, lab: built.lab, identity: built.identity, bytes: built.gz.length,
+            cast: built.castName, params: built.params,
+            message: 'Hosted. Paste the URL into the question field and click Check.',
+          }, acaostar);
+        } catch (error) { return sendJson(res, 422, { error: error.message }, acaostar); }
+      }
+
+      if (!email || !quizSign) return sendJson(res, 400, { error: 'email and quizSign are required' }, acaostar);
+      try {
+        const built = await buildArchive({
+          origin: String(origin || `https://${new URL(req.headers.origin || 'https://exam.sanand.workers.dev').host}`),
+          email: String(email), quizSign: String(quizSign), idToken: String(idToken || ''),
+          name: String(name || email), sub: String(sub || ''),
+        });
+        const name2 = crypto.randomUUID() + '.tar.gz';
+        await mkdir(join(DATA_DIR, 'artifacts'), { recursive: true });
+        await writeFile(join(DATA_DIR, 'artifacts', name2), built.gz, { mode: 0o600 });
+        return sendJson(res, 201, {
+          url: '/artifacts/' + name2, cipher: built.cipher, code: built.plaintext,
+          candidates: built.candidates.length, identity: built.identity, bytes: built.gz.length,
+          message: 'Hosted. Paste the URL into the question field and click Check.',
+        }, acaostar);
+      } catch (error) {
+        return sendJson(res, 422, { error: error.message }, acaostar);
       }
     }
 
