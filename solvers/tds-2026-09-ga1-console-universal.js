@@ -616,15 +616,26 @@
   if (OPTIONS.autoLabs !== false && B && typeof document.body.append === 'function') {
     const pending = Object.keys({ 'q-termlog-rec-server': true }).some(qid => document.getElementById(qid) && !document.getElementById(qid).value.trim());
     if (pending) {
+      // labs-client.js needs a live Google sign-in popup plus a single-use
+      // 5-minute paste window, so it stalls for anyone who is not already inside
+      // that flow. The backend builds the whole signed archive from this
+      // student's own email + quizSign instead: real challenge cipher, real
+      // recording, uploaded and ready to paste.
       labsPromise = (async () => {
-        const client = await import(BACKEND.replace(/\/+$/, '') + '/labs-client.js');
-        const challenge = new URL('/questionData', location.origin);
-        for (const [key, value] of Object.entries({ email: EMAIL, quizSign: user.quizSign || '', questionId: 'q-termlog-rec-server' })) challenge.searchParams.set(key, value);
-        return client.runSignedLabs({ backend: BACKEND, email: EMAIL, challengeUrl: challenge.href, tasks: ['decode','httpbin','model'],
-          onArtifact: (qid, url) => { if (document.getElementById(qid)) fill(qid, url); },
+        const idToken = localStorage.getItem('tl_id_token') || user.idToken || '';
+        console.info('[ga1] Building your signed termlog archive server-side…');
+        const response = await origFetch(BACKEND.replace(/\/+$/, '') + '/termlog', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: EMAIL, quizSign: user.quizSign || '', idToken, name: user.name || EMAIL, sub: user.sub || '' }),
         });
-      })().catch(error => { console.error('[signed labs]', error.message); return null; });
-      console.info('[ga1] Signed-lab panel is opening — complete Google sign-in + paste within 5 minutes (official login limit) while Check runs. Codes are single-use; never reuse an old localhost URL.');
+        const result = await response.json();
+        if (!response.ok || !result.url) throw new Error('q-termlog-rec-server: ' + (result.error || response.status));
+        const url = BACKEND.replace(/\/+$/, '') + result.url;
+        if (!fill('q-termlog-rec-server', url)) throw new Error('q-termlog-rec-server: input missing');
+        console.info(`[ga1] q-termlog-rec-server → ${url} (${result.bytes} B, ${result.candidates} cipher candidates, identity ${result.identity})`);
+        return true;
+      })().catch(error => { console.error('[termlog lab]', error.message); return null; });
+      console.info('[ga1] The termlog archive is building server-side; Check re-runs as soon as it is filled.');
     }
   }
 
