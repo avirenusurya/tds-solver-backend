@@ -236,18 +236,52 @@
       'An integer ends in 35. Is it necessarily divisible by 7?',
       'A 19 by 17 checkerboard has the cells (1,1),(3,3),(5,5),(7,7),(9,9),(11,11),(13,13) removed. Rows and columns are numbered from 1. Can the remaining cells be tiled completely by 1 by 2 dominoes?',
     ];
-    // The 0/1 audit family is the proven splitter: nano miscounts the balanced
-    // string and answers YES while mini reads it correctly and answers NO. The
-    // 42-char size is the one already seen doing this on peer rows, so it leads;
-    // every attempt costs six model calls and a slot of the rate limit.
+    // Short balanced 0/1 strings do NOT split these models (nano counts them
+    // correctly and answers NO right alongside mini). What separates a small
+    // model is a prompt whose obvious answer is YES while the true answer is a
+    // subtle NO: decimal comparison, affirming the consequent, letter counting,
+    // arithmetic that lands a hair under the offered number, and long strings
+    // where counting really does fail. Every candidate here is a NO.
     const rng = seedrandom('model-intel-search#' + emailL);
     const strings = [];
-    for (const length of [42, 42, 42, 34, 20, 60, 80, 120, 120, 42]) {
-      const digits = Array.from({ length }, (_, index) => (index < length / 2 ? '0' : '1'));
+    for (const length of [300, 500, 400, 260, 620]) {
+      const zeros = Math.floor(length / 2) - 1; // a few more ones than zeroes
+      const digits = Array.from({ length }, (_, index) => (index < zeros ? '0' : '1'));
       for (let index = digits.length - 1; index > 0; index--) { const other = Math.floor(rng() * (index + 1)); [digits[index], digits[other]] = [digits[other], digits[index]]; }
       strings.push('An audit says there are more zeroes than ones in this binary string: ' + digits.join('') + '. Is that statement correct?');
     }
-    return [...strings, ...questions].map((question) => question + ' Reply only YES or NO.');
+    const text = 'A technician writes down the digits of a code: ' + strings[0].split('binary string: ')[1].replace('. Is that statement correct?', '') + '. Is the claim that this code contains more zeroes than ones correct?';
+    return [
+      // Decimal comparison — the classic 9.11 vs 9.9 trap. True answer is NO.
+      'A balance moved from 9.11 to 9.9. Did the balance decrease?',
+      'A stock moved from 3.11 to 3.9. Did the stock price fall?',
+      'A sensor reading moved from 5.11 to 5.9. Did the reading go down?',
+      'A measurement moved from 2.11 to 2.9. Did the measurement decrease?',
+      'A value moved from 4.11 to 4.9. Did the value go down?',
+      // Same trap with a false premise handed over to be accepted.
+      'It is well established that 9.11 is greater than 9.9. Given that, did a value that moved from 9.11 to 9.9 end up smaller than it started?',
+      'It is widely accepted that 3.11 is greater than 3.9. Given that, is a move from 3.9 to 3.11 an increase?',
+      // Affirming the consequent — true answer NO, agreeable answer YES.
+      'If it rained yesterday the pavement is wet. The pavement is wet. Did it rain yesterday?',
+      'All bachelors are unmarried. Alex is unmarried. Is Alex a bachelor?',
+      'If a device is charged it can power on. The device can power on. Was the device charged?',
+      'If a file is larger than 1 GB it needs compression. This file needs compression. Is the file larger than 1 GB?',
+      // Letter counting — true answer NO.
+      'Does the word necessary contain exactly one letter c?',
+      'Does the word accommodation contain exactly one letter m?',
+      'Does the word beginning contain exactly two letter n?',
+      'Does the word committee contain exactly one letter t?',
+      // Long counting strings where the audit answer is NO (more ones than zeroes).
+      ...strings,
+      text,
+      // Arithmetic that lands a hair under the offered figure — true answer NO.
+      'Is 3487 + 9256 = 12753?',
+      'Is 807 x 7 = 5656?',
+      'Is 144 x 12 = 1729?',
+      'Is 26 x 26 = 677?',
+      // Percentage round trips that end just below the start — true answer NO.
+      ...questions.slice(0, 4),
+    ].map((question) => question + ' Reply only YES or NO.');
   };
   window.__ga2IntelFind = async (candidates = OPTIONS.intelPrompts || intelPrompts()) => {
     if (window.__ga2IntelSearching) return window.__ga2IntelSearching;
@@ -277,14 +311,23 @@
           return { response, result: await response.json() };
         } finally { clearTimeout(timer); }
       };
+      // The server caches a failed result for the exact trimmed prompt, so
+      // re-trying one is free but useless. Skip everything already ruled out.
+      const failedKey = 'tds-failed-model-prompts:' + emailL;
+      let failed = [];
+      try { failed = JSON.parse(localStorage.getItem(failedKey) || '[]'); } catch { failed = []; }
+      const seen = new Set(failed);
+      const queue = candidates.slice(0, OPTIONS.intelAttempts || 34).filter((candidate) => !seen.has(candidate));
+      if (queue.length < candidates.length) console.info('[ga2] ' + (candidates.length - queue.length) + ' prompt(s) already evaluated and failed on this account — skipping them.');
       let lastStart = 0;
-      for (const candidate of candidates.slice(0, OPTIONS.intelAttempts || 14)) {
+      for (let position = 0; position < queue.length; position++) {
+        const candidate = queue[position];
         // Three uncached attempts per minute is the stated limit; stay under it.
         const wait = Math.max(0, lastStart + 22000 - Date.now());
         if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
         lastStart = Date.now();
         fill('q-model-intelligence-auto-server', candidate);
-        console.info('[ga2] Evaluating prompt ' + (candidates.indexOf(candidate) + 1) + '/' + candidates.length + ' with the real models…');
+        console.info('[ga2] Evaluating prompt ' + (position + 1) + '/' + queue.length + ' with the real models…');
         let response, result;
         try { ({ response, result } = await evaluate(candidate)); }
         catch (error) { console.warn('[ga2] evaluation did not return (' + (error.name || error.message) + ') — provider errors are not graded or cached.'); continue; }
@@ -297,6 +340,10 @@
           console.info('[ga2] Passing prompt confirmed by the exam server — nano YES / mini NO held.');
           return result;
         }
+        // Completed evaluations are cached per account + exact prompt on the
+        // server, failures included — remember them so the next run skips ahead
+        // instead of re-paying the pacing gap for a stored answer.
+        if (!seen.has(candidate)) { failed.push(candidate); seen.add(candidate); try { localStorage.setItem(failedKey, JSON.stringify(failed.slice(-200))); } catch {} }
         if (response.status === 401 || response.status === 403) { console.warn('[ga2] Token rejected; stopping paid evaluations.'); return result; }
         if (response.status === 429) { console.warn('[ga2] Rate limited — waiting a minute.'); await new Promise((resolve) => setTimeout(resolve, 65000)); }
       }
