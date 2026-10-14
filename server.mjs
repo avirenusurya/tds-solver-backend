@@ -45,7 +45,7 @@ import { buildGa2Archive } from './termlog-ga2.mjs';
 const PORT = Number(process.env.PORT || 8080);
 const EXAM_ORIGIN = 'https://exam.sanand.workers.dev';
 const DATA_DIR = resolve(process.env.DATA_DIR || './data');
-const REVISION = '2026-10-14-ga2-termlog-labs-v4';
+const REVISION = '2026-10-14-tangram-100-solutions-v5';
 const labManager = createLabManager({ dataDir: DATA_DIR });
 
 /* ================= per-email seeds (exact chunk ports) ================= */
