@@ -6,7 +6,8 @@ RUN curl -fLsS https://github.com/mynkpdr/termlog/releases/download/v0.2.0/terml
 COPY --from=ollama /bin/ollama /usr/local/bin/ollama
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
-COPY server.mjs ledger.mjs invoice.mjs labs.mjs labs-client.mjs tangram.mjs tangram-targets.json tangram-solutions.json ./
+COPY server.mjs ledger.mjs invoice.mjs labs.mjs labs-client.mjs tangram.mjs tangram-targets.json tangram-solutions.json termlog.mjs termlog-ga2.mjs solver-dispatch.mjs ./
+COPY solvers/ ./solvers/
 COPY tools/ ./tools/
 ENV PORT=8080
 EXPOSE 8080
